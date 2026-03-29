@@ -1,0 +1,1 @@
+injective-py>=1.0.0
