@@ -4,8 +4,8 @@
 
 ## Features
 
-- 📊 **Every 5 minutes**: Automated position monitoring
-- 💬 **Slack Alerts**: Instant notifications for liquidable positions  
+- 📊 **Every 1 minute**: Automated position monitoring
+- 💬 **Slack Alerts**: Instant notifications for liquidable positions
 - 🌐 **Express Dashboard**: Web interface with monitoring endpoints
 - ☁️ **AWS Lightsail Ready**: Optimized for cloud deployment
 - 🐍 **Python + Node.js**: Leverages Injective SDK with Express server
@@ -20,13 +20,17 @@ npm install
 pip3 install injective-py
 
 # Configure environment
-echo "SLACK_WEBHOOK_URL=your_webhook_here" >> .env
+cp .env.example .env
+# then edit .env with your Slack bot token, channel ID, and user IDs
 
 # Start server
 npm start
+
+# Or run without sending to Slack
+npm run dry-run
 ```
 
-Server runs on http://localhost:14000
+Server runs on http://localhost:16000
 
 ### AWS Lightsail Deployment
 
@@ -37,7 +41,8 @@ chmod +x deploy.sh
 # Run deployment
 ./deploy.sh
 
-# Edit environment with your Slack webhook
+# Configure environment
+cp .env.example .env
 nano .env
 
 # Restart service
@@ -53,18 +58,23 @@ pm2 restart liquidation-monitor
 
 ## Slack Setup
 
-1. Create Slack webhook: https://api.slack.com/apps
-2. Add webhook URL to `.env`:
+1. Create a Slack app with a bot token: https://api.slack.com/apps
+2. Add the `chat:write` scope and install the app to your workspace
+3. Invite the bot to the channel you want alerts in
+4. Add the bot token, channel ID, and user IDs to mention to `.env`:
    ```
-   SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK
+   SLACK_BOT_TOKEN=xoxb-...
+   SLACK_CHANNEL_ID=C0XXXXXXXXX
+   SLACK_USER_IDS=U0XXXXXXXXX,U0YYYYYYYYY
    ```
-3. Restart: `pm2 restart liquidation-monitor`
+5. Restart: `pm2 restart liquidation-monitor`
 
 ## Monitoring
 
-- **Check Interval**: Every 5 minutes
-- **Alert Trigger**: Any liquidable position found  
-- **Port**: 14000 (configurable)
+- **Check Interval**: Every 1 minute
+- **Alert Trigger**: Liquidable position with value at risk ≥ $1
+- **Alert Cooldown**: 30 minutes per position (follow-up @-mentions on cooldown expiry)
+- **Port**: 16000
 - **Process Manager**: PM2
 
 View logs: `pm2 logs liquidation-monitor`
@@ -87,8 +97,8 @@ Slack alerts include:
          │
          ▼
 ┌─────────────────┐
-│  Slack Webhook  │
-│   (Alerts)      │
+│   Slack Bot     │
+│    (Alerts)     │
 └─────────────────┘
 ```
 
