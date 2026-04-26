@@ -14,8 +14,11 @@ const DRY_RUN = process.argv.includes('--dry-run') || process.env.DRY_RUN === 't
 
 // Slack configuration
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-const SLACK_CHANNEL_ID = 'C08D6LP5C5R';
-const SLACK_USER_IDS = ['U03B55LJPNY', 'U06999CUUTW'];
+const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
+const SLACK_USER_IDS = (process.env.SLACK_USER_IDS || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(Boolean);
 
 // Alert configuration
 const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
