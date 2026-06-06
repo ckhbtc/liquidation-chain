@@ -307,24 +307,31 @@ async function sendSlackAlert(liquidablePositions, isFollowUp = false) {
 async function sendResolvedAlert(resolvedPositions) {
     if (resolvedPositions.length === 0) return;
 
+    const resolvedText = getResolvedAlertText(resolvedPositions);
+
     // In dry run mode, print to console instead of sending to Slack
     if (DRY_RUN) {
         console.log('\n' + '='.repeat(60));
         console.log(`[${getTimestamp()}] POSITIONS RESOLVED (DRY RUN MODE)`);
         console.log('='.repeat(60));
-        console.log(`${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved`);
-        resolvedPositions.slice(0, MAX_ALERT_POSITIONS).forEach((pos) => {
-            console.log(`${getBaseAssetDisplay(pos)} ${pos.position_type}`);
-        });
-        if (resolvedPositions.length > MAX_ALERT_POSITIONS) {
-            console.log(`+${resolvedPositions.length - MAX_ALERT_POSITIONS} more`);
-        }
+        console.log(resolvedText);
         console.log('='.repeat(60) + '\n');
         return;
     }
 
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
 
+    const message = buildResolvedAlertMessage(resolvedPositions);
+
+    try {
+        const result = await slack.chat.postMessage(message);
+        console.log(`[${getTimestamp()}] ✅ Resolved alert sent for ${resolvedPositions.length} positions to ${result.channel}`);
+    } catch (error) {
+        console.error(`[${getTimestamp()}] ❌ Resolved alert failed:`, error.message);
+    }
+}
+
+function getResolvedAlertText(resolvedPositions) {
     const shownResolvedPositions = resolvedPositions.slice(0, MAX_ALERT_POSITIONS);
     const resolvedLines = shownResolvedPositions.map(pos => `${getBaseAssetDisplay(pos)} ${pos.position_type}`);
     const hiddenResolvedCount = resolvedPositions.length - shownResolvedPositions.length;
@@ -333,40 +340,25 @@ async function sendResolvedAlert(resolvedPositions) {
         resolvedLines.push(`+${hiddenResolvedCount} more`);
     }
 
-    const message = {
+    return `${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved: ${resolvedLines.join(', ')}`;
+}
+
+function buildResolvedAlertMessage(resolvedPositions) {
+    const resolvedText = getResolvedAlertText(resolvedPositions);
+
+    return {
         channel: SLACK_CHANNEL_ID,
-        text: `Positions resolved: ${resolvedPositions.length}`,
+        text: resolvedText,
         blocks: [
             {
-                type: "header",
-                text: {
-                    type: "plain_text",
-                    text: "Positions resolved"
-                }
-            },
-            {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `*${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved*`
-                }
-            },
-            {
-                type: "section",
-                text: {
-                    type: "mrkdwn",
-                    text: resolvedLines.join('\n')
+                    text: resolvedText
                 }
             }
         ]
     };
-
-    try {
-        const result = await slack.chat.postMessage(message);
-        console.log(`[${getTimestamp()}] ✅ Resolved alert sent for ${resolvedPositions.length} positions to ${result.channel}`);
-    } catch (error) {
-        console.error(`[${getTimestamp()}] ❌ Resolved alert failed:`, error.message);
-    }
 }
 
 function printAlertToConsole(liquidablePositions, isFollowUp = false) {
@@ -618,6 +610,7 @@ module.exports = {
     MENTION_VALUE_AT_RISK_USD,
     UNCONFIRMED_EXIT_RETENTION_MS,
     buildLiquidationAlertMessage,
+    buildResolvedAlertMessage,
     formatPositionLine,
     getAlertExitAction,
     getAlertCooldownMs,

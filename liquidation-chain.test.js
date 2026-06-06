@@ -9,6 +9,7 @@ const test = require('node:test');
 const {
     ALERT_COOLDOWN_MS,
     buildLiquidationAlertMessage,
+    buildResolvedAlertMessage,
     formatPositionLine,
     getAlertExitAction,
     getAlertCooldownMs,
@@ -137,4 +138,13 @@ test('resolved alerts require confirmed liquidation', () => {
         currentOpenPositionKeys: new Set(),
         confirmedLiquidatedKeys: new Set([key])
     }), 'resolved');
+});
+
+test('resolved alerts render as one compact line', () => {
+    const message = buildResolvedAlertMessage([position()]);
+
+    assert.equal(message.blocks.length, 1);
+    assert.equal(message.blocks[0].type, 'section');
+    assert.equal(message.blocks[0].text.text, '1 position resolved: NEAR Long');
+    assert.doesNotMatch(message.blocks[0].text.text, /\n|Positions resolved/);
 });
