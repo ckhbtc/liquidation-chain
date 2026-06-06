@@ -1,6 +1,7 @@
 node_modules/
 liquidation-env/
 __pycache__/
+data/
 .env
 *.log
 *.db

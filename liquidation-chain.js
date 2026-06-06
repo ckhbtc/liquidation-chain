@@ -3,6 +3,7 @@ const express = require('express');
 const cron = require('node-cron');
 const axios = require('axios');
 const { exec } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 const { WebClient } = require('@slack/web-api');
 
@@ -27,12 +28,43 @@ const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
 const HOUSE_ALERT_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours for non-bankrupt house account follow-ups
 const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
+const DATA_DIR = path.join(__dirname, 'data');
+const ALERT_STATE_FILE = path.join(DATA_DIR, 'alert-state.json');
 
 // Initialize Slack client (only if not in dry run mode)
 const slack = DRY_RUN ? null : new WebClient(SLACK_BOT_TOKEN);
 
 // Track alerted positions: Map<positionKey, {lastAlertTime, position}>
 const alertedPositions = new Map();
+
+function loadAlertState() {
+    try {
+        if (!fs.existsSync(ALERT_STATE_FILE)) return;
+
+        const entries = JSON.parse(fs.readFileSync(ALERT_STATE_FILE, 'utf8'));
+        if (!Array.isArray(entries)) return;
+
+        for (const [key, data] of entries) {
+            if (key && data?.lastAlertTime && data?.position) {
+                alertedPositions.set(key, data);
+            }
+        }
+    } catch (error) {
+        console.error(`[${getTimestamp()}] ⚠️ Failed to load alert state:`, error.message);
+    }
+}
+
+function saveAlertState() {
+    try {
+        if (!fs.existsSync(DATA_DIR)) {
+            fs.mkdirSync(DATA_DIR, { recursive: true });
+        }
+
+        fs.writeFileSync(ALERT_STATE_FILE, JSON.stringify([...alertedPositions.entries()], null, 2));
+    } catch (error) {
+        console.error(`[${getTimestamp()}] ⚠️ Failed to save alert state:`, error.message);
+    }
+}
 
 // Helper function to get formatted timestamp
 function getTimestamp() {
@@ -470,6 +502,8 @@ async function processAlerts(currentLiquidablePositions) {
         await sendSlackAlert(followUpAlerts, true);
     }
 
+    saveAlertState();
+
     // Log summary
     const skippedLowValue = enrichedPositions.length - significantPositions.length;
     if (skippedLowValue > 0) {
@@ -484,6 +518,8 @@ async function processAlerts(currentLiquidablePositions) {
 }
 
 function startServer() {
+    loadAlertState();
+
     // Schedule checks every 1 minute
     cron.schedule('*/1 * * * *', () => {
         runLiquidationCheck();
@@ -520,6 +556,8 @@ module.exports = {
     getValueAtRisk,
     isHouseAccount,
     isBankruptPosition,
+    loadAlertState,
+    saveAlertState,
     shouldMentionPositions,
     shouldSendFollowUp,
     startServer
