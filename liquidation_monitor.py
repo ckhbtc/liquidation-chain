@@ -26,6 +26,9 @@ def bankruptcy_price(quantity: Decimal, entry_price: Decimal, adjusted_position_
 def is_position_bankrupt(adjusted_position_margin: Decimal, quantity: Decimal, entry_price: Decimal, mark_price: Decimal, is_long: bool) -> bool:
     return position_equity(adjusted_position_margin, quantity, entry_price, mark_price, is_long) < Decimal(0)
 
+def position_key(subaccount_id: str, market_id: str) -> str:
+    return f"{subaccount_id}:{market_id}"
+
 async def main() -> None:
     # select network: local, testnet, mainnet
     network = Network.mainnet()
@@ -39,8 +42,16 @@ async def main() -> None:
         positions_dict = await client.fetch_chain_positions()
         total_positions = len(positions_dict.get('state', []))
         liquidable_positions = []
+        open_positions = []
 
         for position in positions_dict["state"]:
+            open_positions.append({
+                "key": position_key(position["subaccountId"], position["marketId"]),
+                "market_id": position["marketId"],
+                "subaccount_id": position["subaccountId"],
+                "position_type": "Long" if position["position"]["isLong"] else "Short",
+            })
+
             if position["marketId"] not in positions_per_market:
                 positions_per_market[position["marketId"]] = []
             positions_per_market[position["marketId"]].append(position)
@@ -108,7 +119,9 @@ async def main() -> None:
             "markets_processed": markets_processed,
             "checked_positions": checked_positions,
             "liquidable_count": len(liquidable_positions),
-            "liquidable_positions": liquidable_positions
+            "liquidable_positions": liquidable_positions,
+            "open_positions": open_positions,
+            "confirmed_liquidated_position_keys": []
         }
         
         print(json.dumps(result, indent=2))

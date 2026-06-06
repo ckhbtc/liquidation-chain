@@ -76,6 +76,26 @@ function getPositionKey(position) {
     return `${position.subaccount_id}:${position.market_id}`;
 }
 
+function getPositionKeySet(positions) {
+    return new Set(positions.map(getPositionKey));
+}
+
+function getAlertExitAction(key, { currentLiquidatableKeys, currentOpenPositionKeys, confirmedLiquidatedKeys }) {
+    if (currentLiquidatableKeys.has(key)) {
+        return 'active';
+    }
+
+    if (currentOpenPositionKeys.has(key)) {
+        return 'retain';
+    }
+
+    if (confirmedLiquidatedKeys.has(key)) {
+        return 'resolved';
+    }
+
+    return 'clear';
+}
+
 // Helper function to calculate value at risk for a position
 function getValueAtRisk(position) {
     return position.quantity * position.mark_price;
@@ -235,6 +255,8 @@ app.use(express.json());
 let latestResults = {
     lastCheck: null,
     liquidablePositions: [],
+    openPositions: [],
+    confirmedLiquidatedPositionKeys: [],
     status: 'starting',
     error: null
 };
@@ -383,6 +405,8 @@ function runLiquidationCheck() {
                 latestResults = {
                     lastCheck: timestamp,
                     liquidablePositions: results.liquidable_positions || [],
+                    openPositions: results.open_positions || [],
+                    confirmedLiquidatedPositionKeys: results.confirmed_liquidated_position_keys || [],
                     totalPositions: results.total_positions,
                     status: 'healthy',
                     error: null
@@ -391,7 +415,11 @@ function runLiquidationCheck() {
                 console.log(`[${getTimestamp()}] ✅ Check complete: ${results.liquidable_count || 0} liquidable positions`);
 
                 // Process alerts with throttling and resolved detection
-                processAlerts(results.liquidable_positions || []);
+                processAlerts(
+                    results.liquidable_positions || [],
+                    results.open_positions || [],
+                    results.confirmed_liquidated_position_keys || []
+                );
             } catch (parseError) {
                 console.error(`[${getTimestamp()}] ❌ Parse error:`, parseError);
                 latestResults = {
@@ -437,9 +465,9 @@ app.get('/health', (req, res) => {
 });
 
 // Process alerts with throttling and resolved detection
-async function processAlerts(currentLiquidablePositions) {
+async function processAlerts(currentLiquidablePositions, currentOpenPositions = [], confirmedLiquidatedPositionKeys = []) {
     const now = Date.now();
-    const currentPositionKeys = new Set();
+    const confirmedLiquidatedKeys = new Set(confirmedLiquidatedPositionKeys);
 
     // Enrich positions with tickers first
     let enrichedPositions = [];
@@ -453,16 +481,23 @@ async function processAlerts(currentLiquidablePositions) {
     // Filter positions by minimum value at risk
     const significantPositions = enrichedPositions.filter(pos => getValueAtRisk(pos) >= MIN_VALUE_AT_RISK);
 
-    // Track current position keys
-    for (const pos of significantPositions) {
-        currentPositionKeys.add(getPositionKey(pos));
-    }
+    const currentPositionKeys = getPositionKeySet(significantPositions);
+    const currentOpenPositionKeys = getPositionKeySet(currentOpenPositions);
 
-    // Check for resolved positions (were alerted but no longer liquidable)
+    // Check for confirmed liquidations. Do not call "resolved" when a position is
+    // merely still open but no longer liquidatable.
     const resolvedPositions = [];
     for (const [key, data] of alertedPositions.entries()) {
-        if (!currentPositionKeys.has(key)) {
+        const exitAction = getAlertExitAction(key, {
+            currentLiquidatableKeys: currentPositionKeys,
+            currentOpenPositionKeys,
+            confirmedLiquidatedKeys
+        });
+
+        if (exitAction === 'resolved') {
             resolvedPositions.push(data.position);
+            alertedPositions.delete(key);
+        } else if (exitAction === 'clear') {
             alertedPositions.delete(key);
         }
     }
@@ -551,9 +586,12 @@ module.exports = {
     MENTION_VALUE_AT_RISK_USD,
     buildLiquidationAlertMessage,
     formatPositionLine,
+    getAlertExitAction,
     getAlertCooldownMs,
     getTotalValueAtRisk,
     getValueAtRisk,
+    getPositionKey,
+    getPositionKeySet,
     isHouseAccount,
     isBankruptPosition,
     loadAlertState,

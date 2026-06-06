@@ -10,6 +10,7 @@ const {
     ALERT_COOLDOWN_MS,
     buildLiquidationAlertMessage,
     formatPositionLine,
+    getAlertExitAction,
     getAlertCooldownMs,
     HOUSE_ALERT_COOLDOWN_MS,
     shouldMentionPositions,
@@ -108,4 +109,31 @@ test('house account bankruptcy bypasses the two-hour cooldown', () => {
         lastAlertTime: 0,
         position: previousHousePosition
     }, 1), true);
+});
+
+test('open positions that stop being liquidatable are retained without resolved alert', () => {
+    const key = 'subaccount-a:market-a';
+    const action = getAlertExitAction(key, {
+        currentLiquidatableKeys: new Set(),
+        currentOpenPositionKeys: new Set([key]),
+        confirmedLiquidatedKeys: new Set()
+    });
+
+    assert.equal(action, 'retain');
+});
+
+test('resolved alerts require confirmed liquidation', () => {
+    const key = 'subaccount-a:market-a';
+
+    assert.equal(getAlertExitAction(key, {
+        currentLiquidatableKeys: new Set(),
+        currentOpenPositionKeys: new Set(),
+        confirmedLiquidatedKeys: new Set()
+    }), 'clear');
+
+    assert.equal(getAlertExitAction(key, {
+        currentLiquidatableKeys: new Set(),
+        currentOpenPositionKeys: new Set(),
+        confirmedLiquidatedKeys: new Set([key])
+    }), 'resolved');
 });
