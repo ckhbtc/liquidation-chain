@@ -27,6 +27,7 @@ const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
 const HOUSE_ALERT_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours for non-bankrupt house account follow-ups
+const UNCONFIRMED_EXIT_RETENTION_MS = 30 * 60 * 1000; // Keep checking briefly for delayed liquidation trades
 const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
 const DATA_DIR = path.join(__dirname, 'data');
 const ALERT_STATE_FILE = path.join(DATA_DIR, 'alert-state.json');
@@ -34,7 +35,7 @@ const ALERT_STATE_FILE = path.join(DATA_DIR, 'alert-state.json');
 // Initialize Slack client (only if not in dry run mode)
 const slack = DRY_RUN ? null : new WebClient(SLACK_BOT_TOKEN);
 
-// Track alerted positions: Map<positionKey, {lastAlertTime, position}>
+// Track alerted positions: Map<positionKey, {lastAlertTime, position, inactiveSince?}>
 const alertedPositions = new Map();
 
 function loadAlertState() {
@@ -64,6 +65,26 @@ function saveAlertState() {
     } catch (error) {
         console.error(`[${getTimestamp()}] ⚠️ Failed to save alert state:`, error.message);
     }
+}
+
+function getAlertedPositionChecks() {
+    return [...alertedPositions.entries()].map(([key, data]) => ({
+        key,
+        lastAlertTime: data.lastAlertTime,
+        market_id: data.position?.market_id,
+        subaccount_id: data.position?.subaccount_id
+    })).filter(check => check.market_id && check.subaccount_id);
+}
+
+function retainUnconfirmedExit(key, data, now) {
+    const inactiveSince = data.inactiveSince || now;
+
+    if (now - inactiveSince >= UNCONFIRMED_EXIT_RETENTION_MS) {
+        alertedPositions.delete(key);
+        return;
+    }
+
+    alertedPositions.set(key, { ...data, inactiveSince });
 }
 
 // Helper function to get formatted timestamp
@@ -384,7 +405,15 @@ function runLiquidationCheck() {
 
         // In dry run mode, always use system python3, otherwise prefer virtual environment
         const pythonCmd = DRY_RUN ? 'python3' : (require('fs').existsSync(venvPython) ? `"${venvPython}"` : 'python3');
-        exec(`${pythonCmd} "${pythonScript}"`, { timeout: 60000 }, (error, stdout, stderr) => {
+        const alertedPositionsJson = JSON.stringify(getAlertedPositionChecks());
+
+        exec(`${pythonCmd} "${pythonScript}"`, {
+            timeout: 60000,
+            env: {
+                ...process.env,
+                ALERTED_POSITIONS_JSON: alertedPositionsJson
+            }
+        }, (error, stdout, stderr) => {
             const timestamp = new Date().toISOString();
 
             if (error) {
@@ -498,7 +527,9 @@ async function processAlerts(currentLiquidablePositions, currentOpenPositions = 
             resolvedPositions.push(data.position);
             alertedPositions.delete(key);
         } else if (exitAction === 'clear') {
-            alertedPositions.delete(key);
+            retainUnconfirmedExit(key, data, now);
+        } else if (data.inactiveSince) {
+            alertedPositions.set(key, { ...data, inactiveSince: undefined });
         }
     }
 
@@ -584,10 +615,12 @@ module.exports = {
     ALERT_COOLDOWN_MS,
     HOUSE_ALERT_COOLDOWN_MS,
     MENTION_VALUE_AT_RISK_USD,
+    UNCONFIRMED_EXIT_RETENTION_MS,
     buildLiquidationAlertMessage,
     formatPositionLine,
     getAlertExitAction,
     getAlertCooldownMs,
+    getAlertedPositionChecks,
     getTotalValueAtRisk,
     getValueAtRisk,
     getPositionKey,

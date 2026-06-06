@@ -1,10 +1,16 @@
 import asyncio
 import json
+import os
 import sys
+import time
 from decimal import Decimal
 
-from pyinjective.async_client_v2 import AsyncClient
+from pyinjective.async_client_v2 import AsyncClient as ChainClient
+from pyinjective.client.model.pagination import PaginationOption
 from pyinjective.core.network import Network
+from pyinjective.indexer_client import IndexerClient
+
+LIQUIDATION_LOOKBACK_MS = 5 * 60 * 1000
 
 def adjusted_margin(quantity: Decimal, margin: Decimal, is_long: bool, cumulative_funding_entry: Decimal, cumulative_funding: Decimal) -> Decimal:
     unrealized_funding_payment = (cumulative_funding - cumulative_funding_entry) * quantity * (-1 if is_long else 1)
@@ -29,16 +35,66 @@ def is_position_bankrupt(adjusted_position_margin: Decimal, quantity: Decimal, e
 def position_key(subaccount_id: str, market_id: str) -> str:
     return f"{subaccount_id}:{market_id}"
 
+def load_alerted_position_checks() -> list[dict]:
+    raw_checks = os.environ.get("ALERTED_POSITIONS_JSON", "[]")
+    try:
+        checks = json.loads(raw_checks)
+        return checks if isinstance(checks, list) else []
+    except json.JSONDecodeError:
+        return []
+
+async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_position_checks: list[dict]) -> list[str]:
+    if not alerted_position_checks:
+        return []
+
+    now_ms = int(time.time() * 1000)
+    indexer_client = IndexerClient(network)
+    liquidated_keys = set()
+
+    for check in alerted_position_checks:
+        key = check.get("key")
+        market_id = check.get("market_id")
+        subaccount_id = check.get("subaccount_id")
+
+        if not key or not market_id or not subaccount_id:
+            continue
+
+        try:
+            last_alert_time = int(check.get("lastAlertTime") or 0)
+        except (TypeError, ValueError):
+            last_alert_time = 0
+
+        start_time = max(0, last_alert_time - LIQUIDATION_LOOKBACK_MS)
+
+        try:
+            trades = await indexer_client.fetch_derivative_trades(
+                market_ids=[market_id],
+                subaccount_ids=[subaccount_id],
+                pagination=PaginationOption(start_time=start_time, end_time=now_ms, limit=100),
+            )
+        except Exception:
+            continue
+
+        for trade in trades.get("trades", []):
+            if trade.get("isLiquidation") is True:
+                liquidated_keys.add(key)
+                break
+
+    return sorted(liquidated_keys)
+
 async def main() -> None:
     # select network: local, testnet, mainnet
     network = Network.mainnet()
 
     # initialize grpc client
-    client = AsyncClient(network)
+    client = ChainClient(network)
 
     positions_per_market = dict()
 
     try:
+        alerted_position_checks = load_alerted_position_checks()
+        confirmed_liquidated_position_keys = await fetch_confirmed_liquidated_position_keys(network, alerted_position_checks)
+
         positions_dict = await client.fetch_chain_positions()
         total_positions = len(positions_dict.get('state', []))
         liquidable_positions = []
@@ -121,7 +177,7 @@ async def main() -> None:
             "liquidable_count": len(liquidable_positions),
             "liquidable_positions": liquidable_positions,
             "open_positions": open_positions,
-            "confirmed_liquidated_position_keys": []
+            "confirmed_liquidated_position_keys": confirmed_liquidated_position_keys
         }
         
         print(json.dumps(result, indent=2))
