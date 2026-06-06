@@ -7,9 +7,13 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const {
+    ALERT_COOLDOWN_MS,
     buildLiquidationAlertMessage,
     formatPositionLine,
-    shouldMentionPositions
+    getAlertCooldownMs,
+    HOUSE_ALERT_COOLDOWN_MS,
+    shouldMentionPositions,
+    shouldSendFollowUp
 } = require('./liquidation-chain');
 
 const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
@@ -79,4 +83,29 @@ test('house account positions are tagged with a house emoji', () => {
     const line = formatPositionLine(position({ subaccount_id: HOUSE_SUBACCOUNT_ID }));
 
     assert.match(line, /^🏠 NEAR Long/);
+});
+
+test('non-bankrupt house account follow-ups use a two-hour cooldown', () => {
+    const housePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_ID });
+
+    assert.equal(getAlertCooldownMs(housePosition), HOUSE_ALERT_COOLDOWN_MS);
+    assert.equal(shouldSendFollowUp(housePosition, {
+        lastAlertTime: 0,
+        position: housePosition
+    }, HOUSE_ALERT_COOLDOWN_MS - 1), false);
+    assert.equal(shouldSendFollowUp(housePosition, {
+        lastAlertTime: 0,
+        position: housePosition
+    }, HOUSE_ALERT_COOLDOWN_MS), true);
+});
+
+test('house account bankruptcy bypasses the two-hour cooldown', () => {
+    const previousHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_ID, is_bankrupt: false });
+    const bankruptHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_ID, is_bankrupt: true });
+
+    assert.equal(getAlertCooldownMs(bankruptHousePosition), ALERT_COOLDOWN_MS);
+    assert.equal(shouldSendFollowUp(bankruptHousePosition, {
+        lastAlertTime: 0,
+        position: previousHousePosition
+    }, 1), true);
 });

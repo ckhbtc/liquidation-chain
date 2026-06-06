@@ -25,6 +25,7 @@ const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
 const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
+const HOUSE_ALERT_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours for non-bankrupt house account follow-ups
 const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
 
 // Initialize Slack client (only if not in dry run mode)
@@ -101,6 +102,23 @@ function getUserMentions() {
 function shouldMentionPositions(positions) {
     return getTotalValueAtRisk(positions) > MENTION_VALUE_AT_RISK_USD ||
         positions.some(isBankruptPosition);
+}
+
+function getAlertCooldownMs(position) {
+    if (isHouseAccount(position) && !isBankruptPosition(position)) {
+        return HOUSE_ALERT_COOLDOWN_MS;
+    }
+
+    return ALERT_COOLDOWN_MS;
+}
+
+function shouldSendFollowUp(position, existingAlert, now) {
+    const becameBankrupt = isBankruptPosition(position) && !isBankruptPosition(existingAlert.position);
+    if (becameBankrupt) {
+        return true;
+    }
+
+    return now - existingAlert.lastAlertTime >= getAlertCooldownMs(position);
 }
 
 function formatPositionLine(position) {
@@ -434,7 +452,7 @@ async function processAlerts(currentLiquidablePositions) {
             // New position - send alert immediately
             newAlerts.push(pos);
             alertedPositions.set(key, { lastAlertTime: now, position: pos });
-        } else if (now - existing.lastAlertTime >= ALERT_COOLDOWN_MS) {
+        } else if (shouldSendFollowUp(pos, existing, now)) {
             // Existing position past cooldown - send follow-up alert
             followUpAlerts.push(pos);
             alertedPositions.set(key, { lastAlertTime: now, position: pos });
@@ -460,7 +478,7 @@ async function processAlerts(currentLiquidablePositions) {
     if (newAlerts.length === 0 && followUpAlerts.length === 0 && significantPositions.length > 0) {
         const throttledCount = significantPositions.length - newAlerts.length - followUpAlerts.length;
         if (throttledCount > 0) {
-            console.log(`[${getTimestamp()}] ℹ️ ${throttledCount} position(s) within 30min cooldown, no alert sent`);
+            console.log(`[${getTimestamp()}] ℹ️ ${throttledCount} position(s) within cooldown, no alert sent`);
         }
     }
 }
@@ -492,12 +510,17 @@ if (require.main === module) {
 }
 
 module.exports = {
+    ALERT_COOLDOWN_MS,
+    HOUSE_ALERT_COOLDOWN_MS,
     MENTION_VALUE_AT_RISK_USD,
     buildLiquidationAlertMessage,
     formatPositionLine,
+    getAlertCooldownMs,
     getTotalValueAtRisk,
     getValueAtRisk,
+    isHouseAccount,
     isBankruptPosition,
     shouldMentionPositions,
+    shouldSendFollowUp,
     startServer
 };
