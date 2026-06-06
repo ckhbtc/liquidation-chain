@@ -25,6 +25,7 @@ const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
 const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
+const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
 
 // Initialize Slack client (only if not in dry run mode)
 const slack = DRY_RUN ? null : new WebClient(SLACK_BOT_TOKEN);
@@ -79,8 +80,18 @@ function getMarketDisplay(position) {
     return position.market_ticker || position.market_id;
 }
 
+function getBaseAssetDisplay(position) {
+    const marketDisplay = String(getMarketDisplay(position) || '');
+    const [baseAsset] = marketDisplay.split('/');
+    return (baseAsset || marketDisplay).trim();
+}
+
 function isBankruptPosition(position) {
     return position.is_bankrupt === true;
+}
+
+function isHouseAccount(position) {
+    return String(position.subaccount_id || '').toLowerCase() === HOUSE_SUBACCOUNT_ID;
 }
 
 function getUserMentions() {
@@ -94,23 +105,16 @@ function shouldMentionPositions(positions) {
 
 function formatPositionLine(position) {
     const bankruptPrefix = isBankruptPosition(position) ? 'BANKRUPT ' : '';
-    return `${bankruptPrefix}${getMarketDisplay(position)} ${position.position_type} ${formatAmount(position.quantity)}, ` +
-        `risk ${formatUsd(getValueAtRisk(position))}, entry ${formatPrice(position.entry_price)}, mark ${formatPrice(position.mark_price)}`;
-}
-
-function getAlertTitle(positions, isFollowUp) {
-    if (positions.some(isBankruptPosition)) {
-        return isFollowUp ? 'Bankruptcy risk persists (30m)' : 'Bankruptcy risk';
-    }
-
-    return isFollowUp ? 'Still liquidatable (30m)' : 'Liquidatable position';
+    const housePrefix = isHouseAccount(position) ? '🏠 ' : '';
+    return `${bankruptPrefix}${housePrefix}${getBaseAssetDisplay(position)} ${position.position_type} ${formatAmount(position.quantity)}, ` +
+        `risk ${formatUsd(getValueAtRisk(position))}, entry ${formatPrice(position.entry_price)}, ` +
+        `mark ${formatPrice(position.mark_price)}, liq ${formatPrice(position.liquidation_price)}`;
 }
 
 function buildLiquidationAlertMessage(liquidablePositions, isFollowUp = false) {
     const totalValueAtRisk = getTotalValueAtRisk(liquidablePositions);
     const shouldMention = shouldMentionPositions(liquidablePositions);
     const userMentions = shouldMention ? getUserMentions() : '';
-    const title = getAlertTitle(liquidablePositions, isFollowUp);
     const summary = `${liquidablePositions.length} position${liquidablePositions.length === 1 ? '' : 's'}, ${formatUsd(totalValueAtRisk)} at risk`;
     const shownPositions = liquidablePositions.slice(0, MAX_ALERT_POSITIONS);
     const positionLines = shownPositions.map(formatPositionLine);
@@ -122,25 +126,18 @@ function buildLiquidationAlertMessage(liquidablePositions, isFollowUp = false) {
 
     const detailsText = [
         userMentions,
-        `*${summary}*`,
+        liquidablePositions.length > 1 ? `*${summary}*` : '',
         positionLines.join('\n')
     ].filter(Boolean).join('\n');
 
     return {
         channel: SLACK_CHANNEL_ID,
-        text: `${userMentions ? `${userMentions} ` : ''}${title}: ${summary}`,
+        text: `${userMentions ? `${userMentions} ` : ''}${liquidablePositions.length > 1 ? summary : positionLines[0]}`,
         mrkdwn: true,
         link_names: true,
         unfurl_links: false,
         unfurl_media: false,
         blocks: [
-            {
-                type: "header",
-                text: {
-                    type: "plain_text",
-                    text: title
-                }
-            },
             {
                 type: "section",
                 text: {
@@ -223,7 +220,7 @@ async function sendResolvedAlert(resolvedPositions) {
         console.log('='.repeat(60));
         console.log(`${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved`);
         resolvedPositions.slice(0, MAX_ALERT_POSITIONS).forEach((pos) => {
-            console.log(`${getMarketDisplay(pos)} ${pos.position_type}`);
+            console.log(`${getBaseAssetDisplay(pos)} ${pos.position_type}`);
         });
         if (resolvedPositions.length > MAX_ALERT_POSITIONS) {
             console.log(`+${resolvedPositions.length - MAX_ALERT_POSITIONS} more`);
@@ -235,7 +232,7 @@ async function sendResolvedAlert(resolvedPositions) {
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
 
     const shownResolvedPositions = resolvedPositions.slice(0, MAX_ALERT_POSITIONS);
-    const resolvedLines = shownResolvedPositions.map(pos => `${getMarketDisplay(pos)} ${pos.position_type}`);
+    const resolvedLines = shownResolvedPositions.map(pos => `${getBaseAssetDisplay(pos)} ${pos.position_type}`);
     const hiddenResolvedCount = resolvedPositions.length - shownResolvedPositions.length;
 
     if (hiddenResolvedCount > 0) {
@@ -280,14 +277,17 @@ async function sendResolvedAlert(resolvedPositions) {
 
 function printAlertToConsole(liquidablePositions, isFollowUp = false) {
     const totalValueAtRisk = getTotalValueAtRisk(liquidablePositions);
-    const headerText = getAlertTitle(liquidablePositions, isFollowUp).toUpperCase();
     const shouldMention = shouldMentionPositions(liquidablePositions);
+    const summary = `${liquidablePositions.length} position${liquidablePositions.length === 1 ? '' : 's'}, ${formatUsd(totalValueAtRisk)} at risk`;
 
     console.log('\n' + '='.repeat(60));
-    console.log(`[${getTimestamp()}] ${headerText} (DRY RUN MODE)`);
+    console.log(`[${getTimestamp()}] DRY RUN MODE`);
     console.log('='.repeat(60));
-    console.log(`${liquidablePositions.length} position${liquidablePositions.length === 1 ? '' : 's'}, ${formatUsd(totalValueAtRisk)} at risk`);
-    console.log('');
+
+    if (liquidablePositions.length > 1) {
+        console.log(summary);
+        console.log('');
+    }
 
     liquidablePositions.slice(0, MAX_ALERT_POSITIONS).forEach((pos) => {
         console.log(formatPositionLine(pos));

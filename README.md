@@ -83,9 +83,9 @@ View logs: `pm2 logs liquidation-monitor`
 ## Alert Format
 
 Slack alerts include:
-- Total liquidable positions and value at risk
-- One compact line per position: market, direction, quantity, risk, entry, and mark
-- No subaccount IDs
+- Total liquidable positions and value at risk only when multiple positions are included
+- One compact line per position: base asset, direction, quantity, risk, entry, mark, and liquidation price
+- No subaccount IDs; the house account is marked with a house emoji
 
 ## Architecture
 
