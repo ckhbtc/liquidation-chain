@@ -29,6 +29,7 @@ function position(overrides = {}) {
         entry_price: 2.51,
         mark_price: 50,
         liquidation_price: 49,
+        bankruptcy_price: 48,
         is_bankrupt: false,
         ...overrides
     };
@@ -63,10 +64,10 @@ test('bankrupt alerts mention configured users even below value threshold', () =
     assert.match(formatPositionLine(bankruptPosition), /^BANKRUPT NEAR Long/);
 });
 
-test('compact position lines omit subaccount, use base asset, and include liquidation price', () => {
+test('compact position lines omit subaccount, use base asset, and include liquidation and bankruptcy prices', () => {
     const line = formatPositionLine(position());
 
-    assert.match(line, /NEAR Long 100, risk \$5,000\.00, entry \$2\.51, mark \$50\.00, liq \$49\.00/);
+    assert.match(line, /NEAR Long 100, risk \$5,000\.00, entry \$2\.51, mark \$50\.00, liq \$49\.00, bkr \$48\.00/);
     assert.doesNotMatch(line, /\/USDC PERP|Subaccount|0x90de5/);
 });
 

@@ -199,7 +199,8 @@ function formatPositionLine(position) {
     const housePrefix = isHouseAccount(position) ? '🏠 ' : '';
     return `${bankruptPrefix}${housePrefix}${getBaseAssetDisplay(position)} ${position.position_type} ${formatAmount(position.quantity)}, ` +
         `risk ${formatUsd(getValueAtRisk(position))}, entry ${formatPrice(position.entry_price)}, ` +
-        `mark ${formatPrice(position.mark_price)}, liq ${formatPrice(position.liquidation_price)}`;
+        `mark ${formatPrice(position.mark_price)}, liq ${formatPrice(position.liquidation_price)}, ` +
+        `bkr ${formatPrice(position.bankruptcy_price)}`;
 }
 
 function buildLiquidationAlertMessage(liquidablePositions, isFollowUp = false) {
