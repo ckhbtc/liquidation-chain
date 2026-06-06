@@ -7,7 +7,7 @@
     "start": "node liquidation-chain.js",
     "dev": "nodemon liquidation-chain.js",
     "dry-run": "node liquidation-chain.js --dry-run",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "python3 -m unittest test_liquidation_monitor.py && node --test"
   },
   "dependencies": {
     "@slack/web-api": "^7.0.0",

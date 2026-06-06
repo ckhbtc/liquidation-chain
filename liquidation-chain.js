@@ -22,6 +22,8 @@ const SLACK_USER_IDS = (process.env.SLACK_USER_IDS || '')
 
 // Alert configuration
 const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
+const MENTION_VALUE_AT_RISK_USD = 25000;
+const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
 
 // Initialize Slack client (only if not in dry run mode)
@@ -45,6 +47,111 @@ function getValueAtRisk(position) {
     return position.quantity * position.mark_price;
 }
 
+function getTotalValueAtRisk(positions) {
+    return positions.reduce((sum, pos) => sum + getValueAtRisk(pos), 0);
+}
+
+function formatUsd(value) {
+    return Number(value || 0).toLocaleString('en-US', {
+        style: 'currency',
+        currency: 'USD',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
+}
+
+function formatPrice(value) {
+    const numericValue = Number(value || 0);
+    const maxDigits = Math.abs(numericValue) >= 1 ? 2 : 6;
+    return `$${numericValue.toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: maxDigits
+    })}`;
+}
+
+function formatAmount(value) {
+    return Number(value || 0).toLocaleString('en-US', {
+        maximumFractionDigits: 4
+    });
+}
+
+function getMarketDisplay(position) {
+    return position.market_ticker || position.market_id;
+}
+
+function isBankruptPosition(position) {
+    return position.is_bankrupt === true;
+}
+
+function getUserMentions() {
+    return SLACK_USER_IDS.map(userId => `<@${userId}>`).join(' ');
+}
+
+function shouldMentionPositions(positions) {
+    return getTotalValueAtRisk(positions) > MENTION_VALUE_AT_RISK_USD ||
+        positions.some(isBankruptPosition);
+}
+
+function formatPositionLine(position) {
+    const bankruptPrefix = isBankruptPosition(position) ? 'BANKRUPT ' : '';
+    return `${bankruptPrefix}${getMarketDisplay(position)} ${position.position_type} ${formatAmount(position.quantity)}, ` +
+        `risk ${formatUsd(getValueAtRisk(position))}, entry ${formatPrice(position.entry_price)}, mark ${formatPrice(position.mark_price)}`;
+}
+
+function getAlertTitle(positions, isFollowUp) {
+    if (positions.some(isBankruptPosition)) {
+        return isFollowUp ? 'Bankruptcy risk persists (30m)' : 'Bankruptcy risk';
+    }
+
+    return isFollowUp ? 'Still liquidatable (30m)' : 'Liquidatable position';
+}
+
+function buildLiquidationAlertMessage(liquidablePositions, isFollowUp = false) {
+    const totalValueAtRisk = getTotalValueAtRisk(liquidablePositions);
+    const shouldMention = shouldMentionPositions(liquidablePositions);
+    const userMentions = shouldMention ? getUserMentions() : '';
+    const title = getAlertTitle(liquidablePositions, isFollowUp);
+    const summary = `${liquidablePositions.length} position${liquidablePositions.length === 1 ? '' : 's'}, ${formatUsd(totalValueAtRisk)} at risk`;
+    const shownPositions = liquidablePositions.slice(0, MAX_ALERT_POSITIONS);
+    const positionLines = shownPositions.map(formatPositionLine);
+    const hiddenCount = liquidablePositions.length - shownPositions.length;
+
+    if (hiddenCount > 0) {
+        positionLines.push(`+${hiddenCount} more`);
+    }
+
+    const detailsText = [
+        userMentions,
+        `*${summary}*`,
+        positionLines.join('\n')
+    ].filter(Boolean).join('\n');
+
+    return {
+        channel: SLACK_CHANNEL_ID,
+        text: `${userMentions ? `${userMentions} ` : ''}${title}: ${summary}`,
+        mrkdwn: true,
+        link_names: true,
+        unfurl_links: false,
+        unfurl_media: false,
+        blocks: [
+            {
+                type: "header",
+                text: {
+                    type: "plain_text",
+                    text: title
+                }
+            },
+            {
+                type: "section",
+                text: {
+                    type: "mrkdwn",
+                    text: detailsText
+                }
+            }
+        ]
+    };
+}
+
 // Helper function to get ticker from market ID
 async function getTickerFromMarketId(marketId) {
     try {
@@ -61,6 +168,11 @@ async function enrichPositionsWithTickers(positions) {
     const enrichedPositions = [];
 
     for (const position of positions) {
+        if (position.market_ticker) {
+            enrichedPositions.push(position);
+            continue;
+        }
+
         const ticker = await getTickerFromMarketId(position.market_id);
         enrichedPositions.push({
             ...position,
@@ -91,80 +203,11 @@ async function sendSlackAlert(liquidablePositions, isFollowUp = false) {
 
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
 
-    const totalLiquidable = liquidablePositions.length;
-    const totalValueAtRisk = liquidablePositions.reduce((sum, pos) =>
-        sum + (pos.quantity * pos.mark_price), 0
-    ).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-    // Create mentions for specified users
-    const userMentions = SLACK_USER_IDS.map(userId => `<@${userId}>`).join(' ');
-
-    const headerText = isFollowUp ? "⚠️ Still Liquidatable (30min Follow-up)" : "🚨 Liquidatable Position Alert";
-
-    // Create position details
-    const positionDetails = liquidablePositions.map((pos, index) => {
-        const marketDisplay = pos.market_ticker || pos.market_id;
-        return `*${index + 1}. ${pos.position_type} Position*\n` +
-            `Market: \`${marketDisplay}\`\n` +
-            `Quantity: ${parseFloat(pos.quantity.toFixed(4))}\n` +
-            `Entry Price: $${pos.entry_price.toFixed(2)}\n` +
-            `Mark Price: $${pos.mark_price.toFixed(2)}\n` +
-            `Liquidation Price: $${pos.liquidation_price.toFixed(2)}\n` +
-            `Value at Risk: $${getValueAtRisk(pos).toFixed(2)}\n` +
-            `Subaccount: \`${pos.subaccount_id}\``;
-    }).join('\n\n');
-
-    // Build blocks array - only include user mentions section on follow-up alerts
-    const blocks = [
-        {
-            type: "header",
-            text: {
-                type: "plain_text",
-                text: headerText
-            }
-        },
-        {
-            type: "section",
-            fields: [
-                {
-                    type: "mrkdwn",
-                    text: `*Total Liquidatable:* ${totalLiquidable}`
-                },
-                {
-                    type: "mrkdwn",
-                    text: `*Value at Risk:* $${totalValueAtRisk}`
-                }
-            ]
-        },
-        {
-            type: "section",
-            text: {
-                type: "mrkdwn",
-                text: positionDetails
-            }
-        }
-    ];
-
-    // Only add user mentions on follow-up alerts
-    if (isFollowUp) {
-        blocks.push({
-            type: "section",
-            text: {
-                type: "mrkdwn",
-                text: `👥 ${userMentions}`
-            }
-        });
-    }
-
-    const message = {
-        channel: SLACK_CHANNEL_ID,
-        text: `${isFollowUp ? '⚠️' : '🚨'} *${headerText}*${isFollowUp ? ' ' + userMentions : ''}`,
-        blocks: blocks
-    };
+    const message = buildLiquidationAlertMessage(liquidablePositions, isFollowUp);
 
     try {
         const result = await slack.chat.postMessage(message);
-        console.log(`[${getTimestamp()}] ✅ Slack alert sent for ${totalLiquidable} positions to ${result.channel}${isFollowUp ? ' (follow-up)' : ''}`);
+        console.log(`[${getTimestamp()}] ✅ Slack alert sent for ${liquidablePositions.length} positions to ${result.channel}${isFollowUp ? ' (follow-up)' : ''}`);
     } catch (error) {
         console.error(`[${getTimestamp()}] ❌ Slack alert failed:`, error.message);
     }
@@ -176,48 +219,52 @@ async function sendResolvedAlert(resolvedPositions) {
     // In dry run mode, print to console instead of sending to Slack
     if (DRY_RUN) {
         console.log('\n' + '='.repeat(60));
-        console.log(`[${getTimestamp()}] ✅ RESOLVED POSITION ALERT (DRY RUN MODE)`);
+        console.log(`[${getTimestamp()}] POSITIONS RESOLVED (DRY RUN MODE)`);
         console.log('='.repeat(60));
-        resolvedPositions.forEach((pos, index) => {
-            const marketDisplay = pos.market_ticker || pos.market_id;
-            console.log(`${index + 1}. ${pos.position_type} Position - ${marketDisplay} - RESOLVED`);
+        console.log(`${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved`);
+        resolvedPositions.slice(0, MAX_ALERT_POSITIONS).forEach((pos) => {
+            console.log(`${getMarketDisplay(pos)} ${pos.position_type}`);
         });
+        if (resolvedPositions.length > MAX_ALERT_POSITIONS) {
+            console.log(`+${resolvedPositions.length - MAX_ALERT_POSITIONS} more`);
+        }
         console.log('='.repeat(60) + '\n');
         return;
     }
 
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
 
-    const positionDetails = resolvedPositions.map((pos, index) => {
-        const marketDisplay = pos.market_ticker || pos.market_id;
-        return `*${index + 1}. ${pos.position_type} Position*\n` +
-            `Market: \`${marketDisplay}\`\n` +
-            `Subaccount: \`${pos.subaccount_id}\``;
-    }).join('\n\n');
+    const shownResolvedPositions = resolvedPositions.slice(0, MAX_ALERT_POSITIONS);
+    const resolvedLines = shownResolvedPositions.map(pos => `${getMarketDisplay(pos)} ${pos.position_type}`);
+    const hiddenResolvedCount = resolvedPositions.length - shownResolvedPositions.length;
+
+    if (hiddenResolvedCount > 0) {
+        resolvedLines.push(`+${hiddenResolvedCount} more`);
+    }
 
     const message = {
         channel: SLACK_CHANNEL_ID,
-        text: `✅ *Positions Resolved* - ${resolvedPositions.length} position(s) liquidated or closed`,
+        text: `Positions resolved: ${resolvedPositions.length}`,
         blocks: [
             {
                 type: "header",
                 text: {
                     type: "plain_text",
-                    text: "✅ Positions Resolved"
+                    text: "Positions resolved"
                 }
             },
             {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: `${resolvedPositions.length} previously liquidatable position(s) have been resolved (liquidated or closed).`
+                    text: `*${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved*`
                 }
             },
             {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: positionDetails
+                    text: resolvedLines.join('\n')
                 }
             }
         ]
@@ -232,35 +279,27 @@ async function sendResolvedAlert(resolvedPositions) {
 }
 
 function printAlertToConsole(liquidablePositions, isFollowUp = false) {
-    const totalLiquidable = liquidablePositions.length;
-    const totalValueAtRisk = liquidablePositions.reduce((sum, pos) =>
-        sum + (pos.quantity * pos.mark_price), 0
-    ).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-
-    const headerText = isFollowUp ? "⚠️ STILL LIQUIDATABLE (30min Follow-up)" : "🚨 LIQUIDATABLE POSITION ALERT";
+    const totalValueAtRisk = getTotalValueAtRisk(liquidablePositions);
+    const headerText = getAlertTitle(liquidablePositions, isFollowUp).toUpperCase();
+    const shouldMention = shouldMentionPositions(liquidablePositions);
 
     console.log('\n' + '='.repeat(60));
     console.log(`[${getTimestamp()}] ${headerText} (DRY RUN MODE)`);
     console.log('='.repeat(60));
-    console.log(`📊 Total Liquidatable: ${totalLiquidable}`);
-    console.log(`💰 Value at Risk: $${totalValueAtRisk}`);
+    console.log(`${liquidablePositions.length} position${liquidablePositions.length === 1 ? '' : 's'}, ${formatUsd(totalValueAtRisk)} at risk`);
     console.log('');
 
-    liquidablePositions.forEach((pos, index) => {
-        const marketDisplay = pos.market_ticker || pos.market_id;
-        console.log(`${index + 1}. ${pos.position_type} Position`);
-        console.log(`   Market: ${marketDisplay}`);
-        console.log(`   Quantity: ${parseFloat(pos.quantity.toFixed(4))}`);
-        console.log(`   Entry Price: $${pos.entry_price.toFixed(2)}`);
-        console.log(`   Mark Price: $${pos.mark_price.toFixed(2)}`);
-        console.log(`   Liquidation Price: $${pos.liquidation_price.toFixed(2)}`);
-        console.log(`   Value at Risk: $${getValueAtRisk(pos).toFixed(2)}`);
-        console.log(`   Subaccount: ${pos.subaccount_id}`);
-        console.log('');
+    liquidablePositions.slice(0, MAX_ALERT_POSITIONS).forEach((pos) => {
+        console.log(formatPositionLine(pos));
     });
 
-    console.log(`👥 Would mention: ${SLACK_USER_IDS.join(', ')}`);
-    console.log(`📢 Would post to channel: ${SLACK_CHANNEL_ID}`);
+    if (liquidablePositions.length > MAX_ALERT_POSITIONS) {
+        console.log(`+${liquidablePositions.length - MAX_ALERT_POSITIONS} more`);
+    }
+
+    console.log('');
+    console.log(shouldMention ? `Would mention: ${SLACK_USER_IDS.join(', ')}` : 'Would not mention users');
+    console.log(`Would post to channel: ${SLACK_CHANNEL_ID}`);
     console.log('='.repeat(60) + '\n');
 }
 
@@ -426,21 +465,39 @@ async function processAlerts(currentLiquidablePositions) {
     }
 }
 
-// Schedule checks every 1 minute
-cron.schedule('*/1 * * * *', () => {
-    runLiquidationCheck();
-});
+function startServer() {
+    // Schedule checks every 1 minute
+    cron.schedule('*/1 * * * *', () => {
+        runLiquidationCheck();
+    });
 
-// Initial check
-setTimeout(() => runLiquidationCheck(), 5000);
+    // Initial check
+    setTimeout(() => runLiquidationCheck(), 5000);
 
-app.listen(PORT, () => {
-    console.log(`[${getTimestamp()}] 🚀 Liquidation Monitor running on port ${PORT}`);
-    console.log(`[${getTimestamp()}] 📊 Monitoring every 1 minute`);
-    console.log(`[${getTimestamp()}] ⏱️ Alert cooldown: 30 minutes per position`);
-    console.log(`[${getTimestamp()}] 💰 Min value at risk for alerts: $${MIN_VALUE_AT_RISK}`);
-    if (DRY_RUN) {
-        console.log(`[${getTimestamp()}] 🔕 DRY RUN MODE: Alerts will print to console instead of Slack`);
-        console.log(`[${getTimestamp()}] 💡 To enable Slack alerts, run without --dry-run flag`);
-    }
-});
+    app.listen(PORT, () => {
+        console.log(`[${getTimestamp()}] 🚀 Liquidation Monitor running on port ${PORT}`);
+        console.log(`[${getTimestamp()}] 📊 Monitoring every 1 minute`);
+        console.log(`[${getTimestamp()}] ⏱️ Alert cooldown: 30 minutes per position`);
+        console.log(`[${getTimestamp()}] 💰 Min value at risk for alerts: $${MIN_VALUE_AT_RISK}`);
+        console.log(`[${getTimestamp()}] 👥 Mention threshold: > ${formatUsd(MENTION_VALUE_AT_RISK_USD)} or bankrupt`);
+        if (DRY_RUN) {
+            console.log(`[${getTimestamp()}] 🔕 DRY RUN MODE: Alerts will print to console instead of Slack`);
+            console.log(`[${getTimestamp()}] 💡 To enable Slack alerts, run without --dry-run flag`);
+        }
+    });
+}
+
+if (require.main === module) {
+    startServer();
+}
+
+module.exports = {
+    MENTION_VALUE_AT_RISK_USD,
+    buildLiquidationAlertMessage,
+    formatPositionLine,
+    getTotalValueAtRisk,
+    getValueAtRisk,
+    isBankruptPosition,
+    shouldMentionPositions,
+    startServer
+};

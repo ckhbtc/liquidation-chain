@@ -10,6 +10,22 @@ def adjusted_margin(quantity: Decimal, margin: Decimal, is_long: bool, cumulativ
     unrealized_funding_payment = (cumulative_funding - cumulative_funding_entry) * quantity * (-1 if is_long else 1)
     return margin + unrealized_funding_payment
 
+def position_pnl(quantity: Decimal, entry_price: Decimal, mark_price: Decimal, is_long: bool) -> Decimal:
+    if is_long:
+        return quantity * (mark_price - entry_price)
+    return quantity * (entry_price - mark_price)
+
+def position_equity(adjusted_position_margin: Decimal, quantity: Decimal, entry_price: Decimal, mark_price: Decimal, is_long: bool) -> Decimal:
+    return adjusted_position_margin + position_pnl(quantity, entry_price, mark_price, is_long)
+
+def bankruptcy_price(quantity: Decimal, entry_price: Decimal, adjusted_position_margin: Decimal, is_long: bool) -> Decimal:
+    if is_long:
+        return entry_price - (adjusted_position_margin / quantity)
+    return entry_price + (adjusted_position_margin / quantity)
+
+def is_position_bankrupt(adjusted_position_margin: Decimal, quantity: Decimal, entry_price: Decimal, mark_price: Decimal, is_long: bool) -> bool:
+    return position_equity(adjusted_position_margin, quantity, entry_price, mark_price, is_long) < Decimal(0)
+
 async def main() -> None:
     # select network: local, testnet, mainnet
     network = Network.mainnet()
@@ -61,20 +77,27 @@ async def main() -> None:
                 maintenance_margin_ratio = client_market.maintenance_margin_ratio * (-1 if is_long else 1)
 
                 liquidation_price = (entry_price + adjusted_unit_margin) / (Decimal(1) + maintenance_margin_ratio)
+                bankrupt_price = bankruptcy_price(quantity, entry_price, adj_margin, is_long)
+                equity = position_equity(adj_margin, quantity, entry_price, market_mark_price, is_long)
+                is_bankrupt = is_position_bankrupt(adj_margin, quantity, entry_price, market_mark_price, is_long)
 
                 should_be_liquidated = (is_long and market_mark_price <= liquidation_price) or (not is_long and market_mark_price >= liquidation_price)
 
                 if should_be_liquidated:
                     liquidable_position = {
-                        "market_id": client_market.ticker,
+                        "market_id": client_market.id,
+                        "market_ticker": client_market.ticker,
                         "subaccount_id": position['subaccountId'],
                         "position_type": "Long" if is_long else "Short",
                         "liquidation_price": float(liquidation_price),
+                        "bankruptcy_price": float(bankrupt_price),
                         "mark_price": float(market_mark_price),
                         "maintenance_margin_ratio": float(client_market.maintenance_margin_ratio),
                         "quantity": float(quantity),
                         "entry_price": float(entry_price),
-                        "margin": float(margin)
+                        "margin": float(margin),
+                        "equity": float(equity),
+                        "is_bankrupt": is_bankrupt
                     }
                     liquidable_positions.append(liquidable_position)
 

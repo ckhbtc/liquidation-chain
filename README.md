@@ -5,7 +5,7 @@
 ## Features
 
 - 📊 **Every 1 minute**: Automated position monitoring
-- 💬 **Slack Alerts**: Instant notifications for liquidable positions
+- 💬 **Slack Alerts**: Compact notifications for liquidable positions
 - 🌐 **Express Dashboard**: Web interface with monitoring endpoints
 - ☁️ **AWS Lightsail Ready**: Optimized for cloud deployment
 - 🐍 **Python + Node.js**: Leverages Injective SDK with Express server
@@ -73,7 +73,8 @@ pm2 restart liquidation-monitor
 
 - **Check Interval**: Every 1 minute
 - **Alert Trigger**: Liquidable position with value at risk ≥ $1
-- **Alert Cooldown**: 30 minutes per position (follow-up @-mentions on cooldown expiry)
+- **Mention Trigger**: Only configured users when alert value at risk is > $25,000 or any position is bankrupt
+- **Alert Cooldown**: 30 minutes per position
 - **Port**: 16000
 - **Process Manager**: PM2
 
@@ -82,10 +83,9 @@ View logs: `pm2 logs liquidation-monitor`
 ## Alert Format
 
 Slack alerts include:
-- 📊 Total liquidable positions
-- 💰 Total value at risk
-- 📈 Long vs Short breakdown
-- 🎯 Top positions by value
+- Total liquidable positions and value at risk
+- One compact line per position: market, direction, quantity, risk, entry, and mark
+- No subaccount IDs
 
 ## Architecture
 
