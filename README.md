@@ -74,7 +74,7 @@ pm2 restart liquidation-monitor
 - **Check Interval**: Every 1 minute
 - **Alert Trigger**: Liquidable position with value at risk ≥ $1
 - **Mention Trigger**: Only configured users when alert value at risk is > $25,000 or any position is bankrupt
-- **Alert Cooldown**: 30 minutes per position; non-bankrupt house account repeats at most every 2 hours
+- **Alert Cooldown**: 30 minutes per position; non-bankrupt house accounts repeat at most every 2 hours
 - **Resolved Alerts**: Only for confirmed liquidations, not for positions that simply become non-liquidatable again
 - **Port**: 16000
 - **Process Manager**: PM2
@@ -86,7 +86,7 @@ View logs: `pm2 logs liquidation-monitor`
 Slack alerts include:
 - Total liquidable positions and value at risk only when multiple positions are included
 - One compact line per position: base asset, direction, quantity, risk, entry, mark, and liquidation price
-- No subaccount IDs; the house account is marked with a house emoji
+- No subaccount IDs; house accounts are marked with a house emoji
 
 ## Architecture
 

@@ -28,7 +28,10 @@ const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
 const HOUSE_ALERT_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours for non-bankrupt house account follow-ups
 const UNCONFIRMED_EXIT_RETENTION_MS = 30 * 60 * 1000; // Keep checking briefly for delayed liquidation trades
-const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
+const HOUSE_SUBACCOUNT_IDS = new Set([
+    '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000',
+    '0x93073bf6ed84f9093f96f525da6cb859776b75d6000000000000000000000000'
+]);
 const DATA_DIR = path.join(__dirname, 'data');
 const ALERT_STATE_FILE = path.join(DATA_DIR, 'alert-state.json');
 
@@ -165,7 +168,7 @@ function isBankruptPosition(position) {
 }
 
 function isHouseAccount(position) {
-    return String(position.subaccount_id || '').toLowerCase() === HOUSE_SUBACCOUNT_ID;
+    return HOUSE_SUBACCOUNT_IDS.has(String(position.subaccount_id || '').toLowerCase());
 }
 
 function getUserMentions() {

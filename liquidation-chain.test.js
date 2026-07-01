@@ -18,7 +18,10 @@ const {
     shouldSendFollowUp
 } = require('./liquidation-chain');
 
-const HOUSE_SUBACCOUNT_ID = '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000';
+const HOUSE_SUBACCOUNT_IDS = [
+    '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000',
+    '0x93073bf6ed84f9093f96f525da6cb859776b75d6000000000000000000000000'
+];
 
 function position(overrides = {}) {
     return {
@@ -83,13 +86,15 @@ test('single-position alerts omit the header block and redundant summary', () =>
 });
 
 test('house account positions are tagged with a house emoji', () => {
-    const line = formatPositionLine(position({ subaccount_id: HOUSE_SUBACCOUNT_ID }));
+    for (const subaccountId of HOUSE_SUBACCOUNT_IDS) {
+        const line = formatPositionLine(position({ subaccount_id: subaccountId }));
 
-    assert.match(line, /^🏠 NEAR Long/);
+        assert.match(line, /^🏠 NEAR Long/);
+    }
 });
 
 test('non-bankrupt house account follow-ups use a two-hour cooldown', () => {
-    const housePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_ID });
+    const housePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_IDS[0] });
 
     assert.equal(getAlertCooldownMs(housePosition), HOUSE_ALERT_COOLDOWN_MS);
     assert.equal(shouldSendFollowUp(housePosition, {
@@ -103,8 +108,8 @@ test('non-bankrupt house account follow-ups use a two-hour cooldown', () => {
 });
 
 test('house account bankruptcy bypasses the two-hour cooldown', () => {
-    const previousHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_ID, is_bankrupt: false });
-    const bankruptHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_ID, is_bankrupt: true });
+    const previousHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_IDS[0], is_bankrupt: false });
+    const bankruptHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_IDS[0], is_bankrupt: true });
 
     assert.equal(getAlertCooldownMs(bankruptHousePosition), ALERT_COOLDOWN_MS);
     assert.equal(shouldSendFollowUp(bankruptHousePosition, {
