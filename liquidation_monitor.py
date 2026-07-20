@@ -43,13 +43,14 @@ def load_alerted_position_checks() -> list[dict]:
     except json.JSONDecodeError:
         return []
 
-async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_position_checks: list[dict]) -> list[str]:
+async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_position_checks: list[dict]) -> tuple[list[str], list[str]]:
     if not alerted_position_checks:
-        return []
+        return [], []
 
     now_ms = int(time.time() * 1000)
     indexer_client = IndexerClient(network)
     liquidated_keys = set()
+    checked_keys = set()
 
     for check in alerted_position_checks:
         key = check.get("key")
@@ -75,12 +76,14 @@ async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_pos
         except Exception:
             continue
 
+        checked_keys.add(key)
+
         for trade in trades.get("trades", []):
             if trade.get("isLiquidation") is True:
                 liquidated_keys.add(key)
                 break
 
-    return sorted(liquidated_keys)
+    return sorted(liquidated_keys), sorted(checked_keys)
 
 async def main() -> None:
     # select network: local, testnet, mainnet
@@ -93,7 +96,7 @@ async def main() -> None:
 
     try:
         alerted_position_checks = load_alerted_position_checks()
-        confirmed_liquidated_position_keys = await fetch_confirmed_liquidated_position_keys(network, alerted_position_checks)
+        confirmed_liquidated_position_keys, liquidation_check_succeeded_position_keys = await fetch_confirmed_liquidated_position_keys(network, alerted_position_checks)
 
         positions_dict = await client.fetch_chain_positions()
         total_positions = len(positions_dict.get('state', []))
@@ -177,7 +180,8 @@ async def main() -> None:
             "liquidable_count": len(liquidable_positions),
             "liquidable_positions": liquidable_positions,
             "open_positions": open_positions,
-            "confirmed_liquidated_position_keys": confirmed_liquidated_position_keys
+            "confirmed_liquidated_position_keys": confirmed_liquidated_position_keys,
+            "liquidation_check_succeeded_position_keys": liquidation_check_succeeded_position_keys
         }
         
         print(json.dumps(result, indent=2))

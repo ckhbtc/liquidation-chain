@@ -79,15 +79,8 @@ function getAlertedPositionChecks() {
     })).filter(check => check.market_id && check.subaccount_id);
 }
 
-function retainUnconfirmedExit(key, data, now) {
-    const inactiveSince = data.inactiveSince || now;
-
-    if (now - inactiveSince >= UNCONFIRMED_EXIT_RETENTION_MS) {
-        alertedPositions.delete(key);
-        return;
-    }
-
-    alertedPositions.set(key, { ...data, inactiveSince });
+function shouldSendUnconfirmedOutcome(data, now) {
+    return Boolean(data.inactiveSince) && now - data.inactiveSince >= UNCONFIRMED_EXIT_RETENTION_MS;
 }
 
 // Helper function to get formatted timestamp
@@ -104,20 +97,29 @@ function getPositionKeySet(positions) {
     return new Set(positions.map(getPositionKey));
 }
 
-function getAlertExitAction(key, { currentLiquidatableKeys, currentOpenPositionKeys, confirmedLiquidatedKeys }) {
+function getAlertExitAction(key, {
+    currentLiquidatableKeys,
+    currentOpenPositionKeys,
+    confirmedLiquidatedKeys,
+    liquidationCheckSucceededKeys = new Set()
+}) {
     if (currentLiquidatableKeys.has(key)) {
         return 'active';
     }
 
     if (confirmedLiquidatedKeys.has(key)) {
-        return 'resolved';
+        return 'liquidated';
+    }
+
+    if (!liquidationCheckSucceededKeys.has(key)) {
+        return 'retry';
     }
 
     if (currentOpenPositionKeys.has(key)) {
-        return 'retain';
+        return 'risk-cleared';
     }
 
-    return 'clear';
+    return 'closed';
 }
 
 // Helper function to calculate value at risk for a position
@@ -282,6 +284,7 @@ let latestResults = {
     liquidablePositions: [],
     openPositions: [],
     confirmedLiquidatedPositionKeys: [],
+    liquidationCheckSucceededPositionKeys: [],
     status: 'starting',
     error: null
 };
@@ -307,57 +310,68 @@ async function sendSlackAlert(liquidablePositions, isFollowUp = false) {
     }
 }
 
-async function sendResolvedAlert(resolvedPositions) {
-    if (resolvedPositions.length === 0) return;
+async function sendPositionOutcomeAlert(outcome, positions) {
+    if (positions.length === 0) return;
 
-    const resolvedText = getResolvedAlertText(resolvedPositions);
+    const outcomeText = getPositionOutcomeAlertText(outcome, positions);
 
     // In dry run mode, print to console instead of sending to Slack
     if (DRY_RUN) {
         console.log('\n' + '='.repeat(60));
-        console.log(`[${getTimestamp()}] POSITIONS RESOLVED (DRY RUN MODE)`);
+        console.log(`[${getTimestamp()}] POSITION OUTCOME: ${outcome} (DRY RUN MODE)`);
         console.log('='.repeat(60));
-        console.log(resolvedText);
+        console.log(outcomeText);
         console.log('='.repeat(60) + '\n');
         return;
     }
 
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
 
-    const message = buildResolvedAlertMessage(resolvedPositions);
+    const message = buildPositionOutcomeAlertMessage(outcome, positions);
 
     try {
         const result = await slack.chat.postMessage(message);
-        console.log(`[${getTimestamp()}] ✅ Resolved alert sent for ${resolvedPositions.length} positions to ${result.channel}`);
+        console.log(`[${getTimestamp()}] ✅ ${outcome} alert sent for ${positions.length} positions to ${result.channel}`);
     } catch (error) {
-        console.error(`[${getTimestamp()}] ❌ Resolved alert failed:`, error.message);
+        console.error(`[${getTimestamp()}] ❌ ${outcome} alert failed:`, error.message);
     }
 }
 
-function getResolvedAlertText(resolvedPositions) {
-    const shownResolvedPositions = resolvedPositions.slice(0, MAX_ALERT_POSITIONS);
-    const resolvedLines = shownResolvedPositions.map(pos => `${getBaseAssetDisplay(pos)} ${pos.position_type}`);
-    const hiddenResolvedCount = resolvedPositions.length - shownResolvedPositions.length;
+function getPositionOutcomeAlertText(outcome, positions) {
+    const labels = {
+        liquidated: ['liquidation confirmed', 'liquidations confirmed'],
+        'risk-cleared': ['position no longer liquidatable', 'positions no longer liquidatable'],
+        closed: ['position closed without liquidation', 'positions closed without liquidation']
+    };
+    const label = labels[outcome];
 
-    if (hiddenResolvedCount > 0) {
-        resolvedLines.push(`+${hiddenResolvedCount} more`);
+    if (!label) {
+        throw new Error(`Unknown position outcome: ${outcome}`);
     }
 
-    return `${resolvedPositions.length} position${resolvedPositions.length === 1 ? '' : 's'} resolved: ${resolvedLines.join(', ')}`;
+    const shownPositions = positions.slice(0, MAX_ALERT_POSITIONS);
+    const positionLines = shownPositions.map(pos => `${getBaseAssetDisplay(pos)} ${pos.position_type}`);
+    const hiddenCount = positions.length - shownPositions.length;
+
+    if (hiddenCount > 0) {
+        positionLines.push(`+${hiddenCount} more`);
+    }
+
+    return `${positions.length} ${positions.length === 1 ? label[0] : label[1]}: ${positionLines.join(', ')}`;
 }
 
-function buildResolvedAlertMessage(resolvedPositions) {
-    const resolvedText = getResolvedAlertText(resolvedPositions);
+function buildPositionOutcomeAlertMessage(outcome, positions) {
+    const outcomeText = getPositionOutcomeAlertText(outcome, positions);
 
     return {
         channel: SLACK_CHANNEL_ID,
-        text: resolvedText,
+        text: outcomeText,
         blocks: [
             {
                 type: "section",
                 text: {
                     type: "mrkdwn",
-                    text: resolvedText
+                    text: outcomeText
                 }
             }
         ]
@@ -432,6 +446,7 @@ function runLiquidationCheck() {
                     liquidablePositions: results.liquidable_positions || [],
                     openPositions: results.open_positions || [],
                     confirmedLiquidatedPositionKeys: results.confirmed_liquidated_position_keys || [],
+                    liquidationCheckSucceededPositionKeys: results.liquidation_check_succeeded_position_keys || [],
                     totalPositions: results.total_positions,
                     status: 'healthy',
                     error: null
@@ -443,7 +458,8 @@ function runLiquidationCheck() {
                 processAlerts(
                     results.liquidable_positions || [],
                     results.open_positions || [],
-                    results.confirmed_liquidated_position_keys || []
+                    results.confirmed_liquidated_position_keys || [],
+                    results.liquidation_check_succeeded_position_keys || []
                 );
             } catch (parseError) {
                 console.error(`[${getTimestamp()}] ❌ Parse error:`, parseError);
@@ -489,10 +505,16 @@ app.get('/health', (req, res) => {
     });
 });
 
-// Process alerts with throttling and resolved detection
-async function processAlerts(currentLiquidablePositions, currentOpenPositions = [], confirmedLiquidatedPositionKeys = []) {
+// Process alerts with throttling and outcome detection
+async function processAlerts(
+    currentLiquidablePositions,
+    currentOpenPositions = [],
+    confirmedLiquidatedPositionKeys = [],
+    liquidationCheckSucceededPositionKeys = []
+) {
     const now = Date.now();
     const confirmedLiquidatedKeys = new Set(confirmedLiquidatedPositionKeys);
+    const liquidationCheckSucceededKeys = new Set(liquidationCheckSucceededPositionKeys);
 
     // Enrich positions with tickers first
     let enrichedPositions = [];
@@ -509,29 +531,38 @@ async function processAlerts(currentLiquidablePositions, currentOpenPositions = 
     const currentPositionKeys = getPositionKeySet(significantPositions);
     const currentOpenPositionKeys = getPositionKeySet(currentOpenPositions);
 
-    // Check for confirmed liquidations. Do not call "resolved" when a position is
-    // merely still open but no longer liquidatable.
-    const resolvedPositions = [];
+    const outcomePositions = {
+        liquidated: [],
+        'risk-cleared': [],
+        closed: []
+    };
     for (const [key, data] of alertedPositions.entries()) {
         const exitAction = getAlertExitAction(key, {
             currentLiquidatableKeys: currentPositionKeys,
             currentOpenPositionKeys,
-            confirmedLiquidatedKeys
+            confirmedLiquidatedKeys,
+            liquidationCheckSucceededKeys
         });
 
-        if (exitAction === 'resolved') {
-            resolvedPositions.push(data.position);
+        if (exitAction === 'liquidated') {
+            outcomePositions[exitAction].push(data.position);
             alertedPositions.delete(key);
-        } else if (exitAction === 'clear') {
-            retainUnconfirmedExit(key, data, now);
-        } else if (data.inactiveSince) {
+        } else if (exitAction === 'risk-cleared' || exitAction === 'closed') {
+            if (shouldSendUnconfirmedOutcome(data, now)) {
+                outcomePositions[exitAction].push(data.position);
+                alertedPositions.delete(key);
+            } else {
+                alertedPositions.set(key, { ...data, inactiveSince: data.inactiveSince || now });
+            }
+        } else if (exitAction === 'active' && data.inactiveSince) {
             alertedPositions.set(key, { ...data, inactiveSince: undefined });
         }
     }
 
-    // Send resolved alerts
-    if (resolvedPositions.length > 0) {
-        await sendResolvedAlert(resolvedPositions);
+    for (const [outcome, positions] of Object.entries(outcomePositions)) {
+        if (positions.length > 0) {
+            await sendPositionOutcomeAlert(outcome, positions);
+        }
     }
 
     // Separate new alerts from follow-up alerts
@@ -613,7 +644,7 @@ module.exports = {
     MENTION_VALUE_AT_RISK_USD,
     UNCONFIRMED_EXIT_RETENTION_MS,
     buildLiquidationAlertMessage,
-    buildResolvedAlertMessage,
+    buildPositionOutcomeAlertMessage,
     formatPositionLine,
     getAlertExitAction,
     getAlertCooldownMs,
@@ -627,6 +658,7 @@ module.exports = {
     loadAlertState,
     saveAlertState,
     shouldMentionPositions,
+    shouldSendUnconfirmedOutcome,
     shouldSendFollowUp,
     startServer
 };

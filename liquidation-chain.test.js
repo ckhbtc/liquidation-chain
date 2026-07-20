@@ -9,12 +9,14 @@ const test = require('node:test');
 const {
     ALERT_COOLDOWN_MS,
     buildLiquidationAlertMessage,
-    buildResolvedAlertMessage,
+    buildPositionOutcomeAlertMessage,
     formatPositionLine,
     getAlertExitAction,
     getAlertCooldownMs,
     HOUSE_ALERT_COOLDOWN_MS,
+    UNCONFIRMED_EXIT_RETENTION_MS,
     shouldMentionPositions,
+    shouldSendUnconfirmedOutcome,
     shouldSendFollowUp
 } = require('./liquidation-chain');
 
@@ -118,44 +120,74 @@ test('house account bankruptcy bypasses the two-hour cooldown', () => {
     }, 1), true);
 });
 
-test('open positions that stop being liquidatable are retained without resolved alert', () => {
+test('open positions that stop being liquidatable are marked as risk cleared', () => {
     const key = 'subaccount-a:market-a';
     const action = getAlertExitAction(key, {
         currentLiquidatableKeys: new Set(),
         currentOpenPositionKeys: new Set([key]),
-        confirmedLiquidatedKeys: new Set()
+        confirmedLiquidatedKeys: new Set(),
+        liquidationCheckSucceededKeys: new Set([key])
     });
 
-    assert.equal(action, 'retain');
+    assert.equal(action, 'risk-cleared');
 });
 
-test('resolved alerts require confirmed liquidation', () => {
+test('position exits wait for a failed liquidation lookup', () => {
+    const key = 'subaccount-a:market-a';
+    const action = getAlertExitAction(key, {
+        currentLiquidatableKeys: new Set(),
+        currentOpenPositionKeys: new Set([key]),
+        confirmedLiquidatedKeys: new Set(),
+        liquidationCheckSucceededKeys: new Set()
+    });
+
+    assert.equal(action, 'retry');
+});
+
+test('non-liquidation outcomes wait for the confirmation window', () => {
+    const now = 1_000_000;
+
+    assert.equal(shouldSendUnconfirmedOutcome({}, now), false);
+    assert.equal(shouldSendUnconfirmedOutcome({ inactiveSince: now - UNCONFIRMED_EXIT_RETENTION_MS + 1 }, now), false);
+    assert.equal(shouldSendUnconfirmedOutcome({ inactiveSince: now - UNCONFIRMED_EXIT_RETENTION_MS }, now), true);
+});
+
+test('position exit actions distinguish liquidation from closure', () => {
     const key = 'subaccount-a:market-a';
 
     assert.equal(getAlertExitAction(key, {
         currentLiquidatableKeys: new Set(),
         currentOpenPositionKeys: new Set(),
-        confirmedLiquidatedKeys: new Set()
-    }), 'clear');
+        confirmedLiquidatedKeys: new Set(),
+        liquidationCheckSucceededKeys: new Set([key])
+    }), 'closed');
 
     assert.equal(getAlertExitAction(key, {
         currentLiquidatableKeys: new Set(),
         currentOpenPositionKeys: new Set(),
         confirmedLiquidatedKeys: new Set([key])
-    }), 'resolved');
+    }), 'liquidated');
 
     assert.equal(getAlertExitAction(key, {
         currentLiquidatableKeys: new Set(),
         currentOpenPositionKeys: new Set([key]),
         confirmedLiquidatedKeys: new Set([key])
-    }), 'resolved');
+    }), 'liquidated');
 });
 
-test('resolved alerts render as one compact line', () => {
-    const message = buildResolvedAlertMessage([position()]);
+test('confirmed liquidation alerts render as one compact line', () => {
+    const message = buildPositionOutcomeAlertMessage('liquidated', [position()]);
 
     assert.equal(message.blocks.length, 1);
     assert.equal(message.blocks[0].type, 'section');
-    assert.equal(message.blocks[0].text.text, '1 position resolved: NEAR Long');
-    assert.doesNotMatch(message.blocks[0].text.text, /\n|Positions resolved/);
+    assert.equal(message.blocks[0].text.text, '1 liquidation confirmed: NEAR Long');
+    assert.doesNotMatch(message.blocks[0].text.text, /\n|Positions resolved|resolved/);
+});
+
+test('risk-cleared and closed alerts use distinct messages', () => {
+    const riskCleared = buildPositionOutcomeAlertMessage('risk-cleared', [position()]);
+    const closed = buildPositionOutcomeAlertMessage('closed', [position()]);
+
+    assert.equal(riskCleared.blocks[0].text.text, '1 position no longer liquidatable: NEAR Long');
+    assert.equal(closed.blocks[0].text.text, '1 position closed without liquidation: NEAR Long');
 });

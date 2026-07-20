@@ -55,14 +55,15 @@ class LiquidationConfirmationTest(unittest.IsolatedAsyncioTestCase):
                 }
 
         with patch("liquidation_monitor.IndexerClient", FakeIndexerClient):
-            keys = await fetch_confirmed_liquidated_position_keys(object(), [{
+            confirmed_keys, checked_keys = await fetch_confirmed_liquidated_position_keys(object(), [{
                 "key": "subaccount-a:market-a",
                 "market_id": "market-a",
                 "subaccount_id": "subaccount-a",
                 "lastAlertTime": 1000,
             }])
 
-        self.assertEqual(keys, ["subaccount-a:market-a"])
+        self.assertEqual(confirmed_keys, ["subaccount-a:market-a"])
+        self.assertEqual(checked_keys, ["subaccount-a:market-a"])
         self.assertEqual(calls[0]["market_ids"], ["market-a"])
         self.assertEqual(calls[0]["subaccount_ids"], ["subaccount-a"])
         self.assertEqual(calls[0]["pagination"].start_time, max(0, 1000 - LIQUIDATION_LOOKBACK_MS))
@@ -77,14 +78,34 @@ class LiquidationConfirmationTest(unittest.IsolatedAsyncioTestCase):
                 return {"trades": [{"isLiquidation": False}]}
 
         with patch("liquidation_monitor.IndexerClient", FakeIndexerClient):
-            keys = await fetch_confirmed_liquidated_position_keys(object(), [{
+            confirmed_keys, checked_keys = await fetch_confirmed_liquidated_position_keys(object(), [{
                 "key": "subaccount-a:market-a",
                 "market_id": "market-a",
                 "subaccount_id": "subaccount-a",
                 "lastAlertTime": 1000,
             }])
 
-        self.assertEqual(keys, [])
+        self.assertEqual(confirmed_keys, [])
+        self.assertEqual(checked_keys, ["subaccount-a:market-a"])
+
+    async def test_does_not_mark_failed_trade_lookup_as_checked(self):
+        class FakeIndexerClient:
+            def __init__(self, network):
+                self.network = network
+
+            async def fetch_derivative_trades(self, **kwargs):
+                raise RuntimeError("indexer unavailable")
+
+        with patch("liquidation_monitor.IndexerClient", FakeIndexerClient):
+            confirmed_keys, checked_keys = await fetch_confirmed_liquidated_position_keys(object(), [{
+                "key": "subaccount-a:market-a",
+                "market_id": "market-a",
+                "subaccount_id": "subaccount-a",
+                "lastAlertTime": 1000,
+            }])
+
+        self.assertEqual(confirmed_keys, [])
+        self.assertEqual(checked_keys, [])
 
 
 if __name__ == "__main__":
