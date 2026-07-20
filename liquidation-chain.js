@@ -109,12 +109,12 @@ function getAlertExitAction(key, { currentLiquidatableKeys, currentOpenPositionK
         return 'active';
     }
 
-    if (currentOpenPositionKeys.has(key)) {
-        return 'retain';
-    }
-
     if (confirmedLiquidatedKeys.has(key)) {
         return 'resolved';
+    }
+
+    if (currentOpenPositionKeys.has(key)) {
+        return 'retain';
     }
 
     return 'clear';

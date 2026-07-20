@@ -143,6 +143,12 @@ test('resolved alerts require confirmed liquidation', () => {
         currentOpenPositionKeys: new Set(),
         confirmedLiquidatedKeys: new Set([key])
     }), 'resolved');
+
+    assert.equal(getAlertExitAction(key, {
+        currentLiquidatableKeys: new Set(),
+        currentOpenPositionKeys: new Set([key]),
+        confirmedLiquidatedKeys: new Set([key])
+    }), 'resolved');
 });
 
 test('resolved alerts render as one compact line', () => {
