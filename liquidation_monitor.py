@@ -43,14 +43,26 @@ def load_alerted_position_checks() -> list[dict]:
     except json.JSONDecodeError:
         return []
 
-async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_position_checks: list[dict]) -> tuple[list[str], list[str]]:
+def normalize_trade_event(trade: dict) -> dict | None:
+    trade_id = trade.get("tradeId") or trade.get("trade_id") or trade.get("id")
+    if not trade_id:
+        return None
+
+    position_delta = trade.get("positionDelta") or trade.get("position_delta") or {}
+    return {
+        "id": str(trade_id),
+        "isLiquidation": trade.get("isLiquidation") is True,
+        "tradeDirection": position_delta.get("tradeDirection") or position_delta.get("trade_direction"),
+    }
+
+
+async def fetch_position_trade_checks(network: Network, alerted_position_checks: list[dict]) -> dict[str, dict]:
     if not alerted_position_checks:
-        return [], []
+        return {}
 
     now_ms = int(time.time() * 1000)
     indexer_client = IndexerClient(network)
-    liquidated_keys = set()
-    checked_keys = set()
+    position_trade_checks = {}
 
     for check in alerted_position_checks:
         key = check.get("key")
@@ -61,11 +73,11 @@ async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_pos
             continue
 
         try:
-            last_alert_time = int(check.get("lastAlertTime") or 0)
+            last_trade_check_time = int(check.get("lastTradeCheckTime") or check.get("lastAlertTime") or 0)
         except (TypeError, ValueError):
-            last_alert_time = 0
+            last_trade_check_time = 0
 
-        start_time = max(0, last_alert_time - LIQUIDATION_LOOKBACK_MS)
+        start_time = max(0, last_trade_check_time - LIQUIDATION_LOOKBACK_MS)
 
         try:
             trades = await indexer_client.fetch_derivative_trades(
@@ -76,14 +88,16 @@ async def fetch_confirmed_liquidated_position_keys(network: Network, alerted_pos
         except Exception:
             continue
 
-        checked_keys.add(key)
+        normalized_trades = [
+            event for event in (normalize_trade_event(trade) for trade in trades.get("trades", []))
+            if event is not None
+        ]
+        position_trade_checks[key] = {
+            "checked": True,
+            "trades": normalized_trades,
+        }
 
-        for trade in trades.get("trades", []):
-            if trade.get("isLiquidation") is True:
-                liquidated_keys.add(key)
-                break
-
-    return sorted(liquidated_keys), sorted(checked_keys)
+    return position_trade_checks
 
 async def main() -> None:
     # select network: local, testnet, mainnet
@@ -96,7 +110,7 @@ async def main() -> None:
 
     try:
         alerted_position_checks = load_alerted_position_checks()
-        confirmed_liquidated_position_keys, liquidation_check_succeeded_position_keys = await fetch_confirmed_liquidated_position_keys(network, alerted_position_checks)
+        position_trade_checks = await fetch_position_trade_checks(network, alerted_position_checks)
 
         positions_dict = await client.fetch_chain_positions()
         total_positions = len(positions_dict.get('state', []))
@@ -180,8 +194,7 @@ async def main() -> None:
             "liquidable_count": len(liquidable_positions),
             "liquidable_positions": liquidable_positions,
             "open_positions": open_positions,
-            "confirmed_liquidated_position_keys": confirmed_liquidated_position_keys,
-            "liquidation_check_succeeded_position_keys": liquidation_check_succeeded_position_keys
+            "position_trade_checks": position_trade_checks
         }
         
         print(json.dumps(result, indent=2))

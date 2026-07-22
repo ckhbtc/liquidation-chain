@@ -9,16 +9,18 @@ const test = require('node:test');
 const {
     ALERT_COOLDOWN_MS,
     buildLiquidationAlertMessage,
+    buildIncidentProgressAlertMessage,
     buildPositionOutcomeAlertMessage,
     formatPositionLine,
     getAlertExitAction,
-    getAlertCooldownMs,
-    HOUSE_ALERT_COOLDOWN_MS,
+    mergeIncidentTradeEvents,
+    processAlerts,
+    shouldSendIncidentProgress,
     UNCONFIRMED_EXIT_RETENTION_MS,
     shouldMentionPositions,
-    shouldSendUnconfirmedOutcome,
-    shouldSendFollowUp
+    shouldSendUnconfirmedOutcome
 } = require('./liquidation-chain');
+const { alertedPositions } = require('./liquidation-chain');
 
 const HOUSE_SUBACCOUNT_IDS = [
     '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000',
@@ -95,31 +97,6 @@ test('house account positions are tagged with a house emoji', () => {
     }
 });
 
-test('non-bankrupt house account follow-ups use a two-hour cooldown', () => {
-    const housePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_IDS[0] });
-
-    assert.equal(getAlertCooldownMs(housePosition), HOUSE_ALERT_COOLDOWN_MS);
-    assert.equal(shouldSendFollowUp(housePosition, {
-        lastAlertTime: 0,
-        position: housePosition
-    }, HOUSE_ALERT_COOLDOWN_MS - 1), false);
-    assert.equal(shouldSendFollowUp(housePosition, {
-        lastAlertTime: 0,
-        position: housePosition
-    }, HOUSE_ALERT_COOLDOWN_MS), true);
-});
-
-test('house account bankruptcy bypasses the two-hour cooldown', () => {
-    const previousHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_IDS[0], is_bankrupt: false });
-    const bankruptHousePosition = position({ subaccount_id: HOUSE_SUBACCOUNT_IDS[0], is_bankrupt: true });
-
-    assert.equal(getAlertCooldownMs(bankruptHousePosition), ALERT_COOLDOWN_MS);
-    assert.equal(shouldSendFollowUp(bankruptHousePosition, {
-        lastAlertTime: 0,
-        position: previousHousePosition
-    }, 1), true);
-});
-
 test('open positions that stop being liquidatable are marked as risk cleared', () => {
     const key = 'subaccount-a:market-a';
     const action = getAlertExitAction(key, {
@@ -160,34 +137,111 @@ test('position exit actions distinguish liquidation from closure', () => {
         currentOpenPositionKeys: new Set(),
         confirmedLiquidatedKeys: new Set(),
         liquidationCheckSucceededKeys: new Set([key])
-    }), 'closed');
+    }), 'closed-by-trader');
 
     assert.equal(getAlertExitAction(key, {
         currentLiquidatableKeys: new Set(),
         currentOpenPositionKeys: new Set(),
         confirmedLiquidatedKeys: new Set([key])
-    }), 'liquidated');
+    }), 'fully-liquidated');
 
     assert.equal(getAlertExitAction(key, {
         currentLiquidatableKeys: new Set(),
         currentOpenPositionKeys: new Set([key]),
         confirmedLiquidatedKeys: new Set([key])
-    }), 'liquidated');
+    }), 'risk-cleared');
 });
 
 test('confirmed liquidation alerts render as one compact line', () => {
-    const message = buildPositionOutcomeAlertMessage('liquidated', [position()]);
+    const message = buildPositionOutcomeAlertMessage('fully-liquidated', [position()]);
 
     assert.equal(message.blocks.length, 1);
     assert.equal(message.blocks[0].type, 'section');
-    assert.equal(message.blocks[0].text.text, '1 liquidation confirmed: NEAR Long');
+    assert.equal(message.blocks[0].text.text, '1 position fully liquidated: NEAR Long');
     assert.doesNotMatch(message.blocks[0].text.text, /\n|Positions resolved|resolved/);
 });
 
 test('risk-cleared and closed alerts use distinct messages', () => {
     const riskCleared = buildPositionOutcomeAlertMessage('risk-cleared', [position()]);
-    const closed = buildPositionOutcomeAlertMessage('closed', [position()]);
+    const closed = buildPositionOutcomeAlertMessage('closed-by-trader', [position()]);
 
-    assert.equal(riskCleared.blocks[0].text.text, '1 position no longer liquidatable: NEAR Long');
-    assert.equal(closed.blocks[0].text.text, '1 position closed without liquidation: NEAR Long');
+    assert.equal(riskCleared.blocks[0].text.text, '1 position risk cleared, remains open: NEAR Long');
+    assert.equal(closed.blocks[0].text.text, '1 position closed by trader: NEAR Long');
+});
+
+test('open incidents send one non-mention progress update every 30 minutes', () => {
+    const now = 1_000_000;
+    const incident = { lastProgressAlertTime: now - ALERT_COOLDOWN_MS };
+
+    assert.equal(shouldSendIncidentProgress(incident, now), true);
+    assert.equal(shouldSendIncidentProgress({ lastProgressAlertTime: now - ALERT_COOLDOWN_MS + 1 }, now), false);
+
+    const message = buildIncidentProgressAlertMessage('partial-liquidation', [position()]);
+    assert.equal(message.blocks[0].text.text, '1 partial liquidation in progress: NEAR Long 100 remaining, risk $5,000.00');
+    assert.doesNotMatch(JSON.stringify(message), /<@U111>|<@U222>|<!here>/);
+});
+
+test('incident trade events are deduplicated and classify liquidations separately from trader reductions', () => {
+    const initial = {
+        position: position({ position_type: 'Short' }),
+        seenTradeIds: []
+    };
+    const tradeCheck = {
+        checked: true,
+        trades: [
+            { id: 'liq-1', isLiquidation: true, tradeDirection: 'sell' },
+            { id: 'trader-close-1', isLiquidation: false, tradeDirection: 'buy' }
+        ]
+    };
+
+    const updated = mergeIncidentTradeEvents(initial, tradeCheck, 2_000);
+
+    assert.deepEqual(updated.seenTradeIds, ['liq-1', 'trader-close-1']);
+    assert.equal(updated.hadLiquidation, true);
+    assert.equal(updated.hadTraderReduction, true);
+    assert.equal(updated.lastTradeCheckTime, 2_000);
+
+    const deduplicated = mergeIncidentTradeEvents(updated, tradeCheck, 3_000);
+    assert.deepEqual(deduplicated.seenTradeIds, ['liq-1', 'trader-close-1']);
+    assert.equal(deduplicated.lastTradeCheckTime, 3_000);
+});
+
+test('a partial liquidation keeps the same incident open without a second initial alert', async () => {
+    const now = 2_000_000;
+    const atRisk = position();
+    const key = `${atRisk.subaccount_id}:${atRisk.market_id}`;
+    const originalNow = Date.now;
+    const originalLog = console.log;
+
+    alertedPositions.clear();
+    alertedPositions.set(key, {
+        lastAlertTime: now - 60_000,
+        lastProgressAlertTime: now - 60_000,
+        lastTradeCheckTime: now - 60_000,
+        position: atRisk,
+        seenTradeIds: [],
+        hadLiquidation: false,
+        hadTraderReduction: false
+    });
+    Date.now = () => now;
+    console.log = () => {};
+
+    try {
+        await processAlerts([atRisk], [atRisk], {
+            [key]: {
+                checked: true,
+                trades: [{ id: 'partial-liquidation-1', isLiquidation: true, tradeDirection: 'sell' }]
+            }
+        });
+
+        const incident = alertedPositions.get(key);
+        assert.ok(incident);
+        assert.equal(incident.lastAlertTime, now - 60_000);
+        assert.equal(incident.hadLiquidation, true);
+        assert.deepEqual(incident.seenTradeIds, ['partial-liquidation-1']);
+    } finally {
+        Date.now = originalNow;
+        console.log = originalLog;
+        alertedPositions.clear();
+    }
 });

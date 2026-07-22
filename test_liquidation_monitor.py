@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from liquidation_monitor import (
     bankruptcy_price,
-    fetch_confirmed_liquidated_position_keys,
+    fetch_position_trade_checks,
     is_position_bankrupt,
     LIQUIDATION_LOOKBACK_MS,
     position_key,
@@ -38,7 +38,7 @@ class BankruptcyMathTest(unittest.TestCase):
 
 
 class LiquidationConfirmationTest(unittest.IsolatedAsyncioTestCase):
-    async def test_confirms_keys_with_liquidation_trades(self):
+    async def test_returns_trade_events_for_each_successful_lookup(self):
         calls = []
 
         class FakeIndexerClient:
@@ -49,44 +49,70 @@ class LiquidationConfirmationTest(unittest.IsolatedAsyncioTestCase):
                 calls.append(kwargs)
                 return {
                     "trades": [
-                        {"isLiquidation": False},
-                        {"isLiquidation": True},
+                        {
+                            "tradeId": "trader-close-1",
+                            "isLiquidation": False,
+                            "positionDelta": {"tradeDirection": "buy"},
+                        },
+                        {
+                            "tradeId": "liquidation-1",
+                            "isLiquidation": True,
+                            "positionDelta": {"tradeDirection": "sell"},
+                        },
                     ]
                 }
 
         with patch("liquidation_monitor.IndexerClient", FakeIndexerClient):
-            confirmed_keys, checked_keys = await fetch_confirmed_liquidated_position_keys(object(), [{
+            checks = await fetch_position_trade_checks(object(), [{
                 "key": "subaccount-a:market-a",
                 "market_id": "market-a",
                 "subaccount_id": "subaccount-a",
                 "lastAlertTime": 1000,
+                "lastTradeCheckTime": 2000,
             }])
 
-        self.assertEqual(confirmed_keys, ["subaccount-a:market-a"])
-        self.assertEqual(checked_keys, ["subaccount-a:market-a"])
+        self.assertEqual(checks, {
+            "subaccount-a:market-a": {
+                "checked": True,
+                "trades": [
+                    {"id": "trader-close-1", "isLiquidation": False, "tradeDirection": "buy"},
+                    {"id": "liquidation-1", "isLiquidation": True, "tradeDirection": "sell"},
+                ],
+            },
+        })
         self.assertEqual(calls[0]["market_ids"], ["market-a"])
         self.assertEqual(calls[0]["subaccount_ids"], ["subaccount-a"])
-        self.assertEqual(calls[0]["pagination"].start_time, max(0, 1000 - LIQUIDATION_LOOKBACK_MS))
+        self.assertEqual(calls[0]["pagination"].start_time, max(0, 2000 - LIQUIDATION_LOOKBACK_MS))
         self.assertEqual(calls[0]["pagination"].limit, 100)
 
-    async def test_ignores_non_liquidation_trades(self):
+    async def test_returns_non_liquidation_trade_events(self):
         class FakeIndexerClient:
             def __init__(self, network):
                 self.network = network
 
             async def fetch_derivative_trades(self, **kwargs):
-                return {"trades": [{"isLiquidation": False}]}
+                return {
+                    "trades": [{
+                        "tradeId": "trader-close-1",
+                        "isLiquidation": False,
+                        "positionDelta": {"tradeDirection": "buy"},
+                    }]
+                }
 
         with patch("liquidation_monitor.IndexerClient", FakeIndexerClient):
-            confirmed_keys, checked_keys = await fetch_confirmed_liquidated_position_keys(object(), [{
+            checks = await fetch_position_trade_checks(object(), [{
                 "key": "subaccount-a:market-a",
                 "market_id": "market-a",
                 "subaccount_id": "subaccount-a",
                 "lastAlertTime": 1000,
             }])
 
-        self.assertEqual(confirmed_keys, [])
-        self.assertEqual(checked_keys, ["subaccount-a:market-a"])
+        self.assertEqual(checks, {
+            "subaccount-a:market-a": {
+                "checked": True,
+                "trades": [{"id": "trader-close-1", "isLiquidation": False, "tradeDirection": "buy"}],
+            },
+        })
 
     async def test_does_not_mark_failed_trade_lookup_as_checked(self):
         class FakeIndexerClient:
@@ -97,15 +123,14 @@ class LiquidationConfirmationTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("indexer unavailable")
 
         with patch("liquidation_monitor.IndexerClient", FakeIndexerClient):
-            confirmed_keys, checked_keys = await fetch_confirmed_liquidated_position_keys(object(), [{
+            checks = await fetch_position_trade_checks(object(), [{
                 "key": "subaccount-a:market-a",
                 "market_id": "market-a",
                 "subaccount_id": "subaccount-a",
                 "lastAlertTime": 1000,
             }])
 
-        self.assertEqual(confirmed_keys, [])
-        self.assertEqual(checked_keys, [])
+        self.assertEqual(checks, {})
 
 
 if __name__ == "__main__":

@@ -25,9 +25,9 @@ const SLACK_USER_IDS = (process.env.SLACK_USER_IDS || '')
 const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
 const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
-const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between alerts for same position
-const HOUSE_ALERT_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours for non-bankrupt house account follow-ups
+const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between incident progress updates
 const UNCONFIRMED_EXIT_RETENTION_MS = 30 * 60 * 1000; // Keep checking briefly for delayed liquidation trades
+const MAX_SEEN_TRADE_IDS = 200;
 const HOUSE_SUBACCOUNT_IDS = new Set([
     '0x90de5ac1987a9874ae868e703c4c6320548a316a000000000000000000000000',
     '0x93073bf6ed84f9093f96f525da6cb859776b75d6000000000000000000000000'
@@ -38,7 +38,7 @@ const ALERT_STATE_FILE = path.join(DATA_DIR, 'alert-state.json');
 // Initialize Slack client (only if not in dry run mode)
 const slack = DRY_RUN ? null : new WebClient(SLACK_BOT_TOKEN);
 
-// Track alerted positions: Map<positionKey, {lastAlertTime, position, inactiveSince?}>
+// Track alert incidents: Map<positionKey, {lastAlertTime, lastProgressAlertTime, position, seenTradeIds, hadLiquidation, hadTraderReduction, inactiveSince?}>
 const alertedPositions = new Map();
 
 function loadAlertState() {
@@ -74,13 +74,20 @@ function getAlertedPositionChecks() {
     return [...alertedPositions.entries()].map(([key, data]) => ({
         key,
         lastAlertTime: data.lastAlertTime,
+        lastTradeCheckTime: data.lastTradeCheckTime || data.lastAlertTime,
         market_id: data.position?.market_id,
-        subaccount_id: data.position?.subaccount_id
+        subaccount_id: data.position?.subaccount_id,
+        position_type: data.position?.position_type
     })).filter(check => check.market_id && check.subaccount_id);
 }
 
 function shouldSendUnconfirmedOutcome(data, now) {
     return Boolean(data.inactiveSince) && now - data.inactiveSince >= UNCONFIRMED_EXIT_RETENTION_MS;
+}
+
+function shouldSendIncidentProgress(data, now) {
+    const lastUpdate = data.lastProgressAlertTime || data.lastAlertTime;
+    return now - lastUpdate >= ALERT_COOLDOWN_MS;
 }
 
 // Helper function to get formatted timestamp
@@ -108,7 +115,7 @@ function getAlertExitAction(key, {
     }
 
     if (confirmedLiquidatedKeys.has(key)) {
-        return 'liquidated';
+        return currentOpenPositionKeys.has(key) ? 'risk-cleared' : 'fully-liquidated';
     }
 
     if (!liquidationCheckSucceededKeys.has(key)) {
@@ -119,7 +126,40 @@ function getAlertExitAction(key, {
         return 'risk-cleared';
     }
 
-    return 'closed';
+    return 'closed-by-trader';
+}
+
+function isTraderReduction(position, trade) {
+    if (trade.isLiquidation) return false;
+
+    const direction = String(trade.tradeDirection || '').toLowerCase();
+    return (position.position_type === 'Long' && direction === 'sell') ||
+        (position.position_type === 'Short' && direction === 'buy');
+}
+
+function mergeIncidentTradeEvents(data, tradeCheck, now) {
+    if (!tradeCheck?.checked) return data;
+
+    const seenTradeIds = new Set(Array.isArray(data.seenTradeIds) ? data.seenTradeIds : []);
+    let hadLiquidation = Boolean(data.hadLiquidation);
+    let hadTraderReduction = Boolean(data.hadTraderReduction);
+
+    for (const trade of tradeCheck.trades || []) {
+        const tradeId = trade?.id || trade?.tradeId;
+        if (!tradeId || seenTradeIds.has(tradeId)) continue;
+
+        seenTradeIds.add(tradeId);
+        hadLiquidation = hadLiquidation || trade.isLiquidation === true;
+        hadTraderReduction = hadTraderReduction || isTraderReduction(data.position, trade);
+    }
+
+    return {
+        ...data,
+        seenTradeIds: [...seenTradeIds].slice(-MAX_SEEN_TRADE_IDS),
+        hadLiquidation,
+        hadTraderReduction,
+        lastTradeCheckTime: now
+    };
 }
 
 // Helper function to calculate value at risk for a position
@@ -182,23 +222,6 @@ function shouldMentionPositions(positions) {
         positions.some(isBankruptPosition);
 }
 
-function getAlertCooldownMs(position) {
-    if (isHouseAccount(position) && !isBankruptPosition(position)) {
-        return HOUSE_ALERT_COOLDOWN_MS;
-    }
-
-    return ALERT_COOLDOWN_MS;
-}
-
-function shouldSendFollowUp(position, existingAlert, now) {
-    const becameBankrupt = isBankruptPosition(position) && !isBankruptPosition(existingAlert.position);
-    if (becameBankrupt) {
-        return true;
-    }
-
-    return now - existingAlert.lastAlertTime >= getAlertCooldownMs(position);
-}
-
 function formatPositionLine(position) {
     const bankruptPrefix = isBankruptPosition(position) ? 'BANKRUPT ' : '';
     const housePrefix = isHouseAccount(position) ? '🏠 ' : '';
@@ -208,7 +231,7 @@ function formatPositionLine(position) {
         `bkr ${formatPrice(position.bankruptcy_price)}`;
 }
 
-function buildLiquidationAlertMessage(liquidablePositions, isFollowUp = false) {
+function buildLiquidationAlertMessage(liquidablePositions) {
     const totalValueAtRisk = getTotalValueAtRisk(liquidablePositions);
     const shouldMention = shouldMentionPositions(liquidablePositions);
     const userMentions = shouldMention ? getUserMentions() : '';
@@ -240,6 +263,46 @@ function buildLiquidationAlertMessage(liquidablePositions, isFollowUp = false) {
                 text: {
                     type: "mrkdwn",
                     text: detailsText
+                }
+            }
+        ]
+    };
+}
+
+function getIncidentProgressAlertText(kind, positions) {
+    const labels = {
+        'partial-liquidation': ['partial liquidation in progress', 'partial liquidations in progress'],
+        'risk-persists': ['liquidation risk persists', 'liquidation risks persist']
+    };
+    const label = labels[kind];
+
+    if (!label) {
+        throw new Error(`Unknown incident progress kind: ${kind}`);
+    }
+
+    const shownPositions = positions.slice(0, MAX_ALERT_POSITIONS);
+    const positionLines = shownPositions.map(pos => `${getBaseAssetDisplay(pos)} ${pos.position_type} ${formatAmount(pos.quantity)} remaining, risk ${formatUsd(getValueAtRisk(pos))}`);
+    const hiddenCount = positions.length - shownPositions.length;
+
+    if (hiddenCount > 0) {
+        positionLines.push(`+${hiddenCount} more`);
+    }
+
+    return `${positions.length} ${positions.length === 1 ? label[0] : label[1]}: ${positionLines.join(', ')}`;
+}
+
+function buildIncidentProgressAlertMessage(kind, positions) {
+    const progressText = getIncidentProgressAlertText(kind, positions);
+
+    return {
+        channel: SLACK_CHANNEL_ID,
+        text: progressText,
+        blocks: [
+            {
+                type: 'section',
+                text: {
+                    type: 'mrkdwn',
+                    text: progressText
                 }
             }
         ]
@@ -283,28 +346,27 @@ let latestResults = {
     lastCheck: null,
     liquidablePositions: [],
     openPositions: [],
-    confirmedLiquidatedPositionKeys: [],
-    liquidationCheckSucceededPositionKeys: [],
+    positionTradeChecks: {},
     status: 'starting',
     error: null
 };
 
-async function sendSlackAlert(liquidablePositions, isFollowUp = false) {
+async function sendSlackAlert(liquidablePositions) {
     if (liquidablePositions.length === 0) return;
 
     // In dry run mode, print to console instead of sending to Slack
     if (DRY_RUN) {
-        printAlertToConsole(liquidablePositions, isFollowUp);
+        printAlertToConsole(liquidablePositions);
         return;
     }
 
     if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
 
-    const message = buildLiquidationAlertMessage(liquidablePositions, isFollowUp);
+    const message = buildLiquidationAlertMessage(liquidablePositions);
 
     try {
         const result = await slack.chat.postMessage(message);
-        console.log(`[${getTimestamp()}] ✅ Slack alert sent for ${liquidablePositions.length} positions to ${result.channel}${isFollowUp ? ' (follow-up)' : ''}`);
+        console.log(`[${getTimestamp()}] ✅ Slack alert sent for ${liquidablePositions.length} positions to ${result.channel}`);
     } catch (error) {
         console.error(`[${getTimestamp()}] ❌ Slack alert failed:`, error.message);
     }
@@ -337,11 +399,31 @@ async function sendPositionOutcomeAlert(outcome, positions) {
     }
 }
 
+async function sendIncidentProgressAlert(kind, positions) {
+    if (positions.length === 0) return;
+
+    const progressText = getIncidentProgressAlertText(kind, positions);
+
+    if (DRY_RUN) {
+        console.log(`[${getTimestamp()}] INCIDENT PROGRESS: ${progressText}`);
+        return;
+    }
+
+    if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID) return;
+
+    try {
+        const result = await slack.chat.postMessage(buildIncidentProgressAlertMessage(kind, positions));
+        console.log(`[${getTimestamp()}] ✅ ${kind} update sent for ${positions.length} positions to ${result.channel}`);
+    } catch (error) {
+        console.error(`[${getTimestamp()}] ❌ ${kind} update failed:`, error.message);
+    }
+}
+
 function getPositionOutcomeAlertText(outcome, positions) {
     const labels = {
-        liquidated: ['liquidation confirmed', 'liquidations confirmed'],
-        'risk-cleared': ['position no longer liquidatable', 'positions no longer liquidatable'],
-        closed: ['position closed without liquidation', 'positions closed without liquidation']
+        'fully-liquidated': ['position fully liquidated', 'positions fully liquidated'],
+        'risk-cleared': ['position risk cleared, remains open', 'positions risk cleared, remain open'],
+        'closed-by-trader': ['position closed by trader', 'positions closed by trader']
     };
     const label = labels[outcome];
 
@@ -378,7 +460,7 @@ function buildPositionOutcomeAlertMessage(outcome, positions) {
     };
 }
 
-function printAlertToConsole(liquidablePositions, isFollowUp = false) {
+function printAlertToConsole(liquidablePositions) {
     const totalValueAtRisk = getTotalValueAtRisk(liquidablePositions);
     const shouldMention = shouldMentionPositions(liquidablePositions);
     const summary = `${liquidablePositions.length} position${liquidablePositions.length === 1 ? '' : 's'}, ${formatUsd(totalValueAtRisk)} at risk`;
@@ -445,8 +527,7 @@ function runLiquidationCheck() {
                     lastCheck: timestamp,
                     liquidablePositions: results.liquidable_positions || [],
                     openPositions: results.open_positions || [],
-                    confirmedLiquidatedPositionKeys: results.confirmed_liquidated_position_keys || [],
-                    liquidationCheckSucceededPositionKeys: results.liquidation_check_succeeded_position_keys || [],
+                    positionTradeChecks: results.position_trade_checks || {},
                     totalPositions: results.total_positions,
                     status: 'healthy',
                     error: null
@@ -458,8 +539,7 @@ function runLiquidationCheck() {
                 processAlerts(
                     results.liquidable_positions || [],
                     results.open_positions || [],
-                    results.confirmed_liquidated_position_keys || [],
-                    results.liquidation_check_succeeded_position_keys || []
+                    results.position_trade_checks || {}
                 );
             } catch (parseError) {
                 console.error(`[${getTimestamp()}] ❌ Parse error:`, parseError);
@@ -509,12 +589,9 @@ app.get('/health', (req, res) => {
 async function processAlerts(
     currentLiquidablePositions,
     currentOpenPositions = [],
-    confirmedLiquidatedPositionKeys = [],
-    liquidationCheckSucceededPositionKeys = []
+    positionTradeChecks = {}
 ) {
     const now = Date.now();
-    const confirmedLiquidatedKeys = new Set(confirmedLiquidatedPositionKeys);
-    const liquidationCheckSucceededKeys = new Set(liquidationCheckSucceededPositionKeys);
 
     // Enrich positions with tickers first
     let enrichedPositions = [];
@@ -530,13 +607,23 @@ async function processAlerts(
 
     const currentPositionKeys = getPositionKeySet(significantPositions);
     const currentOpenPositionKeys = getPositionKeySet(currentOpenPositions);
+    const currentPositionsByKey = new Map(significantPositions.map(pos => [getPositionKey(pos), pos]));
 
     const outcomePositions = {
-        liquidated: [],
+        'fully-liquidated': [],
         'risk-cleared': [],
-        closed: []
+        'closed-by-trader': []
     };
-    for (const [key, data] of alertedPositions.entries()) {
+    const progressPositions = {
+        'partial-liquidation': [],
+        'risk-persists': []
+    };
+
+    for (const [key, savedData] of alertedPositions.entries()) {
+        const tradeCheck = positionTradeChecks[key];
+        const data = mergeIncidentTradeEvents(savedData, tradeCheck, now);
+        const confirmedLiquidatedKeys = data.hadLiquidation ? new Set([key]) : new Set();
+        const liquidationCheckSucceededKeys = tradeCheck?.checked ? new Set([key]) : new Set();
         const exitAction = getAlertExitAction(key, {
             currentLiquidatableKeys: currentPositionKeys,
             currentOpenPositionKeys,
@@ -544,18 +631,29 @@ async function processAlerts(
             liquidationCheckSucceededKeys
         });
 
-        if (exitAction === 'liquidated') {
+        if (exitAction === 'fully-liquidated') {
             outcomePositions[exitAction].push(data.position);
             alertedPositions.delete(key);
-        } else if (exitAction === 'risk-cleared' || exitAction === 'closed') {
+        } else if (exitAction === 'risk-cleared' || exitAction === 'closed-by-trader') {
             if (shouldSendUnconfirmedOutcome(data, now)) {
                 outcomePositions[exitAction].push(data.position);
                 alertedPositions.delete(key);
             } else {
                 alertedPositions.set(key, { ...data, inactiveSince: data.inactiveSince || now });
             }
-        } else if (exitAction === 'active' && data.inactiveSince) {
-            alertedPositions.set(key, { ...data, inactiveSince: undefined });
+        } else if (exitAction === 'active') {
+            const currentPosition = currentPositionsByKey.get(key) || data.position;
+            const updatedData = { ...data, position: currentPosition, inactiveSince: undefined };
+
+            if (shouldSendIncidentProgress(updatedData, now)) {
+                const kind = updatedData.hadLiquidation ? 'partial-liquidation' : 'risk-persists';
+                progressPositions[kind].push(currentPosition);
+                updatedData.lastProgressAlertTime = now;
+            }
+
+            alertedPositions.set(key, updatedData);
+        } else {
+            alertedPositions.set(key, data);
         }
     }
 
@@ -565,34 +663,38 @@ async function processAlerts(
         }
     }
 
-    // Separate new alerts from follow-up alerts
+    for (const [kind, positions] of Object.entries(progressPositions)) {
+        if (positions.length > 0) {
+            await sendIncidentProgressAlert(kind, positions);
+        }
+    }
+
+    // Start a new incident only when the position has not already been alerted.
     const newAlerts = [];
-    const followUpAlerts = [];
 
     for (const pos of significantPositions) {
         const key = getPositionKey(pos);
         const existing = alertedPositions.get(key);
 
         if (!existing) {
-            // New position - send alert immediately
             newAlerts.push(pos);
-            alertedPositions.set(key, { lastAlertTime: now, position: pos });
-        } else if (shouldSendFollowUp(pos, existing, now)) {
-            // Existing position past cooldown - send follow-up alert
-            followUpAlerts.push(pos);
-            alertedPositions.set(key, { lastAlertTime: now, position: pos });
+            alertedPositions.set(key, {
+                lastAlertTime: now,
+                lastProgressAlertTime: now,
+                lastTradeCheckTime: now,
+                position: pos,
+                seenTradeIds: [],
+                hadLiquidation: false,
+                hadTraderReduction: false
+            });
         } else {
-            // Existing position within cooldown - update position data but don't alert
-            alertedPositions.set(key, { lastAlertTime: existing.lastAlertTime, position: pos });
+            alertedPositions.set(key, { ...existing, position: pos, inactiveSince: undefined });
         }
     }
 
     // Send alerts
     if (newAlerts.length > 0) {
-        await sendSlackAlert(newAlerts, false);
-    }
-    if (followUpAlerts.length > 0) {
-        await sendSlackAlert(followUpAlerts, true);
+        await sendSlackAlert(newAlerts);
     }
 
     saveAlertState();
@@ -602,10 +704,10 @@ async function processAlerts(
     if (skippedLowValue > 0) {
         console.log(`[${getTimestamp()}] ℹ️ Skipped ${skippedLowValue} position(s) with value at risk < $${MIN_VALUE_AT_RISK}`);
     }
-    if (newAlerts.length === 0 && followUpAlerts.length === 0 && significantPositions.length > 0) {
-        const throttledCount = significantPositions.length - newAlerts.length - followUpAlerts.length;
-        if (throttledCount > 0) {
-            console.log(`[${getTimestamp()}] ℹ️ ${throttledCount} position(s) within cooldown, no alert sent`);
+    if (newAlerts.length === 0 && significantPositions.length > 0) {
+        const ongoingCount = significantPositions.length - newAlerts.length;
+        if (ongoingCount > 0) {
+            console.log(`[${getTimestamp()}] ℹ️ ${ongoingCount} open incident(s), no initial alert sent`);
         }
     }
 }
@@ -624,7 +726,7 @@ function startServer() {
     app.listen(PORT, () => {
         console.log(`[${getTimestamp()}] 🚀 Liquidation Monitor running on port ${PORT}`);
         console.log(`[${getTimestamp()}] 📊 Monitoring every 1 minute`);
-        console.log(`[${getTimestamp()}] ⏱️ Alert cooldown: 30 minutes per position`);
+        console.log(`[${getTimestamp()}] ⏱️ Incident progress updates: every 30 minutes`);
         console.log(`[${getTimestamp()}] 💰 Min value at risk for alerts: $${MIN_VALUE_AT_RISK}`);
         console.log(`[${getTimestamp()}] 👥 Mention threshold: > ${formatUsd(MENTION_VALUE_AT_RISK_USD)} or bankrupt`);
         if (DRY_RUN) {
@@ -640,14 +742,14 @@ if (require.main === module) {
 
 module.exports = {
     ALERT_COOLDOWN_MS,
-    HOUSE_ALERT_COOLDOWN_MS,
     MENTION_VALUE_AT_RISK_USD,
     UNCONFIRMED_EXIT_RETENTION_MS,
+    alertedPositions,
+    buildIncidentProgressAlertMessage,
     buildLiquidationAlertMessage,
     buildPositionOutcomeAlertMessage,
     formatPositionLine,
     getAlertExitAction,
-    getAlertCooldownMs,
     getAlertedPositionChecks,
     getTotalValueAtRisk,
     getValueAtRisk,
@@ -656,9 +758,11 @@ module.exports = {
     isHouseAccount,
     isBankruptPosition,
     loadAlertState,
+    mergeIncidentTradeEvents,
+    processAlerts,
     saveAlertState,
+    shouldSendIncidentProgress,
     shouldMentionPositions,
     shouldSendUnconfirmedOutcome,
-    shouldSendFollowUp,
     startServer
 };
