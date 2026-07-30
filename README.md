@@ -71,7 +71,7 @@ pm2 restart liquidation-monitor
 
 ## Monitoring
 
-- **Check Interval**: Every 1 minute
+- **Check Interval**: Every 5 minutes
 - **Alert Trigger**: Liquidable position with value at risk ≥ $1
 - **Mention Trigger**: Only configured users when alert value at risk is > $25,000 or any position is bankrupt
 - **Alert Cooldown**: 30 minutes per position; non-bankrupt house accounts repeat at most every 2 hours

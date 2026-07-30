@@ -22,6 +22,8 @@ const SLACK_USER_IDS = (process.env.SLACK_USER_IDS || '')
     .filter(Boolean);
 
 // Alert configuration
+const CHECK_INTERVAL_MINUTES = 5;
+const CHECK_CRON_SCHEDULE = `*/${CHECK_INTERVAL_MINUTES} * * * *`;
 const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
 const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
@@ -715,8 +717,8 @@ async function processAlerts(
 function startServer() {
     loadAlertState();
 
-    // Schedule checks every 1 minute
-    cron.schedule('*/1 * * * *', () => {
+    // Schedule checks at the configured interval
+    cron.schedule(CHECK_CRON_SCHEDULE, () => {
         runLiquidationCheck();
     });
 
@@ -725,7 +727,7 @@ function startServer() {
 
     app.listen(PORT, () => {
         console.log(`[${getTimestamp()}] 🚀 Liquidation Monitor running on port ${PORT}`);
-        console.log(`[${getTimestamp()}] 📊 Monitoring every 1 minute`);
+        console.log(`[${getTimestamp()}] 📊 Monitoring every ${CHECK_INTERVAL_MINUTES} minutes`);
         console.log(`[${getTimestamp()}] ⏱️ Incident progress updates: every 30 minutes`);
         console.log(`[${getTimestamp()}] 💰 Min value at risk for alerts: $${MIN_VALUE_AT_RISK}`);
         console.log(`[${getTimestamp()}] 👥 Mention threshold: > ${formatUsd(MENTION_VALUE_AT_RISK_USD)} or bankrupt`);
@@ -742,6 +744,8 @@ if (require.main === module) {
 
 module.exports = {
     ALERT_COOLDOWN_MS,
+    CHECK_CRON_SCHEDULE,
+    CHECK_INTERVAL_MINUTES,
     MENTION_VALUE_AT_RISK_USD,
     UNCONFIRMED_EXIT_RETENTION_MS,
     alertedPositions,

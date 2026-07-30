@@ -8,6 +8,8 @@ const test = require('node:test');
 
 const {
     ALERT_COOLDOWN_MS,
+    CHECK_CRON_SCHEDULE,
+    CHECK_INTERVAL_MINUTES,
     buildLiquidationAlertMessage,
     buildIncidentProgressAlertMessage,
     buildPositionOutcomeAlertMessage,
@@ -42,6 +44,11 @@ function position(overrides = {}) {
         ...overrides
     };
 }
+
+test('liquidation checks run every five minutes', () => {
+    assert.equal(CHECK_INTERVAL_MINUTES, 5);
+    assert.equal(CHECK_CRON_SCHEDULE, '*/5 * * * *');
+});
 
 test('low value non-bankrupt alerts do not mention users', () => {
     const lowRiskPosition = position({ quantity: 100, mark_price: 50 });
