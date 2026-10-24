@@ -213,6 +213,25 @@ test('incident trade events are deduplicated and classify liquidations separatel
     assert.equal(deduplicated.lastTradeCheckTime, 3_000);
 });
 
+test('positions with value at risk under $5 do not open an incident', async () => {
+    const belowThreshold = position({ subaccount_id: '0xbelow', quantity: 1, mark_price: 4.99 });
+    const atThreshold = position({ subaccount_id: '0xat', quantity: 1, mark_price: 5 });
+    const originalLog = console.log;
+
+    alertedPositions.clear();
+    console.log = () => {};
+
+    try {
+        await processAlerts([belowThreshold, atThreshold], [belowThreshold, atThreshold], {});
+
+        assert.equal(alertedPositions.has(`${belowThreshold.subaccount_id}:${belowThreshold.market_id}`), false);
+        assert.equal(alertedPositions.has(`${atThreshold.subaccount_id}:${atThreshold.market_id}`), true);
+    } finally {
+        console.log = originalLog;
+        alertedPositions.clear();
+    }
+});
+
 test('a partial liquidation keeps the same incident open without a second initial alert', async () => {
     const now = 2_000_000;
     const atRisk = position();

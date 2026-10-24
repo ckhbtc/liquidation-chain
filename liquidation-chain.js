@@ -24,7 +24,7 @@ const SLACK_USER_IDS = (process.env.SLACK_USER_IDS || '')
 // Alert configuration
 const CHECK_INTERVAL_MINUTES = 5;
 const CHECK_CRON_SCHEDULE = `*/${CHECK_INTERVAL_MINUTES} * * * *`;
-const MIN_VALUE_AT_RISK = 1; // Minimum $1 value at risk to send alert
+const MIN_VALUE_AT_RISK = 5; // Minimum $5 value at risk to send alert
 const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between incident progress updates
