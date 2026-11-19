@@ -74,7 +74,7 @@ pm2 restart liquidation-monitor
 - **Check Interval**: Every 5 minutes
 - **Alert Trigger**: Liquidable position with value at risk ≥ $5
 - **Mention Trigger**: Only configured users when alert value at risk is > $25,000 or any position is bankrupt
-- **Alert Cooldown**: 30 minutes per position; non-bankrupt house accounts repeat at most every 2 hours
+- **Alert Cooldown**: progress reminders every 30 minutes per position, or every 12 hours while total value at risk is under $1,000; resolved alerts always send
 - **Resolved Alerts**: Only for confirmed liquidations, not for positions that simply become non-liquidatable again
 - **Port**: 16000
 - **Process Manager**: PM2

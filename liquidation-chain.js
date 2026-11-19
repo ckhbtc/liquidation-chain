@@ -28,6 +28,8 @@ const MIN_VALUE_AT_RISK = 5; // Minimum $5 value at risk to send alert
 const MENTION_VALUE_AT_RISK_USD = 25000;
 const MAX_ALERT_POSITIONS = 10;
 const ALERT_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes between incident progress updates
+const LOW_RISK_TOTAL_USD = 1000; // Below this total value at risk, progress reminders slow down
+const LOW_RISK_ALERT_COOLDOWN_MS = 12 * 60 * 60 * 1000; // 12 hours between low-risk progress updates
 const UNCONFIRMED_EXIT_RETENTION_MS = 30 * 60 * 1000; // Keep checking briefly for delayed liquidation trades
 const MAX_SEEN_TRADE_IDS = 200;
 const HOUSE_SUBACCOUNT_IDS = new Set([
@@ -87,9 +89,13 @@ function shouldSendUnconfirmedOutcome(data, now) {
     return Boolean(data.inactiveSince) && now - data.inactiveSince >= UNCONFIRMED_EXIT_RETENTION_MS;
 }
 
-function shouldSendIncidentProgress(data, now) {
+function getProgressCooldownMs(totalValueAtRisk) {
+    return totalValueAtRisk < LOW_RISK_TOTAL_USD ? LOW_RISK_ALERT_COOLDOWN_MS : ALERT_COOLDOWN_MS;
+}
+
+function shouldSendIncidentProgress(data, now, totalValueAtRisk = Infinity) {
     const lastUpdate = data.lastProgressAlertTime || data.lastAlertTime;
-    return now - lastUpdate >= ALERT_COOLDOWN_MS;
+    return now - lastUpdate >= getProgressCooldownMs(totalValueAtRisk);
 }
 
 // Helper function to get formatted timestamp
@@ -610,6 +616,7 @@ async function processAlerts(
     const currentPositionKeys = getPositionKeySet(significantPositions);
     const currentOpenPositionKeys = getPositionKeySet(currentOpenPositions);
     const currentPositionsByKey = new Map(significantPositions.map(pos => [getPositionKey(pos), pos]));
+    const totalValueAtRisk = significantPositions.reduce((sum, pos) => sum + getValueAtRisk(pos), 0);
 
     const outcomePositions = {
         'fully-liquidated': [],
@@ -647,7 +654,7 @@ async function processAlerts(
             const currentPosition = currentPositionsByKey.get(key) || data.position;
             const updatedData = { ...data, position: currentPosition, inactiveSince: undefined };
 
-            if (shouldSendIncidentProgress(updatedData, now)) {
+            if (shouldSendIncidentProgress(updatedData, now, totalValueAtRisk)) {
                 const kind = updatedData.hadLiquidation ? 'partial-liquidation' : 'risk-persists';
                 progressPositions[kind].push(currentPosition);
                 updatedData.lastProgressAlertTime = now;
@@ -744,6 +751,8 @@ if (require.main === module) {
 
 module.exports = {
     ALERT_COOLDOWN_MS,
+    LOW_RISK_ALERT_COOLDOWN_MS,
+    LOW_RISK_TOTAL_USD,
     CHECK_CRON_SCHEDULE,
     CHECK_INTERVAL_MINUTES,
     MENTION_VALUE_AT_RISK_USD,

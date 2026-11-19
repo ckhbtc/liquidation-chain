@@ -18,6 +18,8 @@ const {
     mergeIncidentTradeEvents,
     processAlerts,
     shouldSendIncidentProgress,
+    LOW_RISK_ALERT_COOLDOWN_MS,
+    LOW_RISK_TOTAL_USD,
     UNCONFIRMED_EXIT_RETENTION_MS,
     shouldMentionPositions,
     shouldSendUnconfirmedOutcome
@@ -166,6 +168,16 @@ test('confirmed liquidation alerts render as one compact line', () => {
     assert.equal(message.blocks[0].type, 'section');
     assert.equal(message.blocks[0].text.text, '1 position fully liquidated: NEAR Long');
     assert.doesNotMatch(message.blocks[0].text.text, /\n|Positions resolved|resolved/);
+});
+
+test('progress updates slow to every 12 hours when total value at risk is under $1k', () => {
+    const now = 100_000_000;
+    const incident = { lastProgressAlertTime: now - ALERT_COOLDOWN_MS };
+
+    assert.equal(shouldSendIncidentProgress(incident, now, LOW_RISK_TOTAL_USD - 0.01), false);
+    assert.equal(shouldSendIncidentProgress(incident, now, LOW_RISK_TOTAL_USD), true);
+    assert.equal(shouldSendIncidentProgress({ lastProgressAlertTime: now - LOW_RISK_ALERT_COOLDOWN_MS + 1 }, now, 49), false);
+    assert.equal(shouldSendIncidentProgress({ lastProgressAlertTime: now - LOW_RISK_ALERT_COOLDOWN_MS }, now, 49), true);
 });
 
 test('risk-cleared and closed alerts use distinct messages', () => {
