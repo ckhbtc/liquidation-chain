@@ -735,7 +735,7 @@ function startServer() {
     app.listen(PORT, () => {
         console.log(`[${getTimestamp()}] 🚀 Liquidation Monitor running on port ${PORT}`);
         console.log(`[${getTimestamp()}] 📊 Monitoring every ${CHECK_INTERVAL_MINUTES} minutes`);
-        console.log(`[${getTimestamp()}] ⏱️ Incident progress updates: every 30 minutes`);
+        console.log(`[${getTimestamp()}] ⏱️ Incident progress updates: every 30 minutes, or 12 hours while total risk < ${formatUsd(LOW_RISK_TOTAL_USD)}`);
         console.log(`[${getTimestamp()}] 💰 Min value at risk for alerts: $${MIN_VALUE_AT_RISK}`);
         console.log(`[${getTimestamp()}] 👥 Mention threshold: > ${formatUsd(MENTION_VALUE_AT_RISK_USD)} or bankrupt`);
         if (DRY_RUN) {
